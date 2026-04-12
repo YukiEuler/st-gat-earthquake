@@ -1,0 +1,59 @@
+\begin{table}[h]
+    \centering
+    \caption{Arsitektur Model ST-GAT}
+    \label{tab:model_architecture}
+    \scriptsize
+    \begin{tabular}{|l|l|l|r|l|}
+        \hline
+        \textbf{Layer} & \textbf{Tipe} & \textbf{Output Shape} & \textbf{Param} & \textbf{Terhubung dari} \\
+        \hline
+        \hline
+        Input & InputLayer & (4, 24, 133, 8) & 0 & - \\
+        \hline
+        node\_embedding & Embedding & (4, 24, 133, 16) & 2,128 & node\_indices \\
+        \hline
+        concat\_features & Concatenate & (4, 24, 133, 24) & 0 & Input, node\_embedding \\
+        \hline
+        input\_proj & Linear & (4, 24, 133, 32) & 800 & concat\_features \\
+        \hline
+        gat\_layer\_1 & MultiHeadGAT & (4, 24, 133, 32) & 3,392 & concat\_features, adj\_matrix \\
+        \hline
+        gat\_norm\_1 & LayerNorm & (4, 24, 133, 32) & 64 & gat\_layer\_1 \\
+        \hline
+        gat\_layer\_2 & MultiHeadGAT & (4, 24, 133, 32) & 10,368 & gat\_norm\_1, adj\_matrix \\
+        \hline
+        skip\_add\_2 & Add (Residual) & (4, 24, 133, 32) & 0 & gat\_layer\_2, gat\_norm\_1 \\
+        \hline
+        gat\_norm\_2 & LayerNorm & (4, 24, 133, 32) & 64 & skip\_add\_2 \\
+        \hline
+        reshape\_for\_lstm & Reshape & (532, 24, 32) & 0 & gat\_norm\_2 \\
+        \hline
+        lstm & LSTM (2-layer, 32 units) & (532, 24, 32) & 16,896 & reshape\_for\_lstm \\
+        \hline
+        lstm\_last\_step & Select[:, -1, :] & (532, 32) & 0 & lstm \\
+        \hline
+        lstm\_norm & LayerNorm & (532, 32) & 64 & lstm\_last\_step \\
+        \hline
+        skip\_temporal\_pool & MeanPool (over T) & (4, 133, 32) & 0 & input\_proj \\
+        \hline
+        skip\_temporal\_proj & Linear & (4, 133, 32) & 1,056 & skip\_temporal\_pool \\
+        \hline
+        concat\_skip & Concatenate & (4, 133, 64) & 0 & lstm\_norm, skip\_temporal\_proj \\
+        \hline
+        dropout & Dropout(0.1) & (4, 133, 64) & 0 & concat\_skip \\
+        \hline
+        fc\_out\_0 & Linear & (4, 133, 32) & 2,080 & dropout \\
+        \hline
+        relu\_1 & ReLU & (4, 133, 32) & 0 & fc\_out\_0 \\
+        \hline
+        dropout\_2 & Dropout(0.1) & (4, 133, 32) & 0 & relu\_1 \\
+        \hline
+        fc\_out\_3 & Linear & (4, 133, 3) & 99 & dropout\_2 \\
+        \hline
+        reshape\_output & Reshape & (4, 1, 133, 3) & 0 & fc\_out\_3 \\
+        \hline
+        \hline
+        \multicolumn{3}{|l|}{\textbf{Total Parameter}} & \multicolumn{2}{r|}{\textbf{37,011}} \\
+        \hline
+    \end{tabular}
+\end{table}

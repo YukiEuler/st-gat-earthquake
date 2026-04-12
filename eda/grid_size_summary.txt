@@ -1,0 +1,43 @@
+
+================================================================================
+GRID SIZE ANALYSIS SUMMARY
+================================================================================
+
+KONFIGURASI:
+- Crop area: lat [42.5747, 42.9047], lon [13.1282, 13.3182]
+- Min events per node: 1500
+- Total events in crop: 457,874
+- Current grid size: 0.01° (~1.1 km)
+
+STATISTIK PADA GRID SIZE 0.01°:
+- Grid dimensions: 33x19
+- Total cells: 627
+- Qualified nodes: 63
+- Event retention: 33.7%
+- Events lost: 303397
+- Avg events/node: 2452.0
+
+TRADE-OFF:
+- Grid lebih kecil → lebih banyak nodes, resolusi tinggi, tapi lebih banyak data loss
+- Grid lebih besar → lebih sedikit nodes, resolusi rendah, tapi retention lebih tinggi
+
+REKOMENDASI:
+- Fine resolution (high nodes, lower retention): 0.01-0.015°
+- Balanced (medium nodes, good retention): 0.02-0.03°
+- Coarse (fewer nodes, high retention): 0.05-0.1°
+
+PERBANDINGAN:
+  0.005° → 11 nodes, 5.0% retention
+  0.01° → 63 nodes, 33.7% retention ← CURRENT
+  0.015° → 133 nodes, 80.9% retention
+  0.02° → 105 nodes, 92.8% retention
+  0.025° → 75 nodes, 95.9% retention
+  0.03° → 56 nodes, 97.6% retention
+  0.04° → 36 nodes, 98.7% retention
+  0.05° → 24 nodes, 99.3% retention
+  0.075° → 13 nodes, 99.6% retention
+  0.1° → 8 nodes, 100.0% retention
+  0.15° → 5 nodes, 99.9% retention
+  0.2° → 2 nodes, 100.0% retention
+
+================================================================================

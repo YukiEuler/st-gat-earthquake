@@ -1,0 +1,38 @@
+
+================================================================================
+JUSTIFIKASI PEMILIHAN AREA CROP
+================================================================================
+
+PERBANDINGAN AREA:
+- Area original: 46,494 km² (lat: 42.1647° - 43.9315°, lon: 11.6882° - 13.8239°)
+- Area crop: 773 km² (lat: 42.5747° - 42.9047°, lon: 13.1282° - 13.3182°)
+- Persentase area: 1.7% dari area original
+
+DISTRIBUSI EVENT:
+- Total event: 900,050
+- Event dalam crop: 457,874 (50.9%)
+- Event di luar crop: 442,176 (49.1%)
+
+ANALISIS DENSITAS:
+- Densitas original: 19.36 event/km²
+- Densitas crop area: 592.70 event/km²
+- Densitas luar crop: 9.67 event/km²
+- Faktor konsentrasi: 30.6x
+  (Artinya: 50.9% event terkandung dalam 1.7% area)
+
+ANALISIS MAGNITUDO:
+- Crop: mean Mw = 0.92, max Mw = 6.08
+- Luar: mean Mw = 0.98, max Mw = 6.06
+
+EVENT SIGNIFIKAN (Mw ≥ 4.0):
+- Dalam crop: 28 event
+- Di luar crop: 36 event
+- 43.8% event signifikan berada dalam crop area
+
+KESIMPULAN:
+Area crop dipilih karena:
+1. Konsentrasi tinggi: 30.6x lipat lebih padat dari rata-rata
+2. 50.9% total event dalam 1.7% area
+3. 43.8% event signifikan (Mw≥4) berada di area ini
+4. Area ini mencakup zona aktif Amatrice sequence 2016-2017
+================================================================================

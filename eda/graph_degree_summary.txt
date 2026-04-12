@@ -1,0 +1,28 @@
+
+================================================================================
+GRAPH DEGREE ANALYSIS SUMMARY
+================================================================================
+
+KONFIGURASI:
+- Grid size: 0.01° (~1.1 km)
+- Min events per node: 1500
+- Qualified nodes: 63
+- Current radius: 15.0 km
+
+STATISTIK PADA RADIUS 15.0 km:
+- Total edges: 1233
+- Average degree: 39.14
+- Connectivity: 100.0%
+- Density: 63.13%
+
+REKOMENDASI:
+- Untuk sparse graph (avg degree 2-4): radius 5-10 km
+- Untuk medium density (avg degree 4-8): radius 10-20 km
+- Untuk dense graph (avg degree 8+): radius 20+ km
+
+DISTRIBUSI DEGREE (radius=15.0 km):
+- Min degree: 14
+- Max degree: 51
+- Mean degree: 39.14
+- Std degree: 12.64
+================================================================================

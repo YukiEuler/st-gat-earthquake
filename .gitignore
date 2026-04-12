@@ -1,0 +1,63 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Large model files
+*.pth
+*.pt
+*.pkl
+*.pickle
+
+# Large data files (ignore raw data, but keep results)
+*.csv
+!outputs/predictions.csv
+!outputs/*/metrics.csv
+*.zip
+*.tar.gz
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Training artifacts (ignore weights, keep logs/results)
+training/checkpoints/
+training/*.pth
+training/*.pt
+outputs/models/
+outputs/ablation_checkpoints/
+outputs/revision_analysis/
+# KEEP: outputs/figures/, outputs/SUMMARY_REPORT.txt, outputs/predictions.csv
+
+# Temporary files
+*.log
+.DS_Store
+Thumbs.db
+
+# Data (keep script, not raw data)
+data/raw/
+data/processed/

@@ -1,0 +1,46 @@
+
+================================================================================
+TIME BIN ANALYSIS SUMMARY
+================================================================================
+
+DATA OVERVIEW:
+- Total events: 457,874
+- Time range: 2016-08-15 01:42:44.947000 to 2017-08-15 23:59:26.632000
+- Duration: 365.9 days (8782 hours)
+- Current time bin: 4h
+
+STATISTIK PADA TIME BIN 4h:
+- Sequence length: 2197 steps
+- Active bins: 2167
+- Empty bins: 30
+- Sparsity: 1.4%
+- Avg events/bin: 211.3
+- Max events/bin: 736
+
+TRADE-OFF:
+- Time bin kecil → sequence panjang, sparsity tinggi, granularity tinggi
+- Time bin besar → sequence pendek, sparsity rendah, granularity rendah
+
+REKOMENDASI:
+- High resolution (fine temporal detail): 1-2h
+- Balanced (moderate seq length, acceptable sparsity): 4-6h
+- Low resolution (shorter sequence, low sparsity): 12-24h
+
+UNTUK LSTM TRAINING:
+- Sequence terlalu panjang → training lambat, memory tinggi
+- Sparsity tinggi → banyak zero-padding, less informative
+- Target: sparsity < 50%, sequence < 10000 steps
+
+PERBANDINGAN:
+  1h → 8784 steps, 2.1% sparse, avg 53.2 events
+  2h → 4393 steps, 1.8% sparse, avg 106.1 events
+  4h → 2197 steps, 1.4% sparse, avg 211.3 events ← CURRENT
+  6h → 1465 steps, 1.1% sparse, avg 316.0 events
+  8h → 1099 steps, 0.8% sparse, avg 420.1 events
+  12h → 733 steps, 0.3% sparse, avg 626.4 events
+  24h → 367 steps, 0.3% sparse, avg 1251.0 events
+  48h → 184 steps, 0.5% sparse, avg 2502.0 events
+  72h → 123 steps, 0.8% sparse, avg 3753.1 events
+  168h → 54 steps, 1.9% sparse, avg 8639.1 events
+
+================================================================================

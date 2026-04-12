@@ -1,0 +1,90 @@
+======================================================================
+ ST-GAT EARTHQUAKE PREDICTION - SUMMARY REPORT
+======================================================================
+
+Generated: 2026-01-28 12:09:21
+
+----------------------------------------------------------------------
+CONFIGURATION
+----------------------------------------------------------------------
+  filename: Amatrice_CAT5.v20210504.csv
+  grid_size: 0.015
+  time_bin: 4h
+  lat_min: 42.5747
+  lat_max: 42.9047
+  lon_min: 13.1282
+  lon_max: 13.3182
+  features: ['count', 'max_mw', 'log_energy', 'avg_depth', 'avg_ml', 'std_ml', 'avg_error', 'ml_n_sum']
+  target_features: ['max_mw']
+  use_active_nodes_only: True
+  min_events_per_node: 1500
+  window_size: 24
+  horizon: 6
+  train_ratio: 0.7
+  val_ratio: 0.1
+  mw_rolling_window: 3
+  rolling_aggregation: {'enabled': True, 'window': 3, 'features': {'count': 'sum', 'max_mw': 'max', 'log_energy': 'sum', 'avg_depth': 'min', 'avg_ml': 'mean', 'std_mw': 'max', 'std_ml': 'max', 'avg_error': 'max', 'ml_n_sum': 'sum'}}
+  radius_km: 15.0
+  sigma_km: 150.0
+  hidden_dim: 32
+  num_gat_layers: 2
+  num_heads: 2
+  dropout: 0.1
+  temporal_model: multiscale
+  tft_layers: 3
+  multiscale_scales: [1, 2, 4]
+  multiscale_fusion: concat
+  batch_size: 4
+  epochs: 50
+  learning_rate: 0.0005
+  early_stopping_patience: 7
+  weight_decay: 0.0001
+  active_weight: 20.0
+  feature_weights: {'count': 1.0, 'max_mw': 5.0, 'log_energy': 2.0, 'avg_depth': 1.0, 'std_mw': 1.0, 'min_depth': 1.0, 'avg_ml': 1.0, 'std_ml': 1.0, 'avg_error': 0.5, 'ml_n_sum': 0.5}
+  loss_type: weighted_mse
+  asymmetric_alpha: 0.8
+  underpredict_penalty: 5.0
+  magnitude_idx: 0
+  focal_gamma: 2.0
+  multiscale_horizons: [1, 2, 4]
+  multiscale_weights: [1.5, 1.75, 2.0]
+  transform_magnitude: True
+  add_running_features: True
+  add_engineered_features: True
+  n_ensemble_models: 5
+  uncertainty_enabled: True
+  hyperparameter_tuning: False
+  cross_validation: False
+  n_cv_splits: 5
+  output_dir: outputs
+  save_figures: True
+  save_attention: True
+  seed: 42
+
+----------------------------------------------------------------------
+RESULTS
+----------------------------------------------------------------------
+  Epochs Trained: 14
+  Best Test Loss: 10.810244
+
+  Overall Metrics:
+    MSE: 0.105302
+    RMSE: 0.324503
+    MAE: 0.275368
+    R2: 0.195083
+    R2_active: 0.195083
+    MAPE: 14852.531433
+
+----------------------------------------------------------------------
+OUTPUT FILES
+----------------------------------------------------------------------
+   outputs/
+      models/
+         stgat_best.pth
+         adjacency_matrix.npz
+      metrics/
+         evaluation_metrics.json
+      figures/
+          *.png
+
+======================================================================

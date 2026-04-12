@@ -1,0 +1,10 @@
+EARTHQUAKE DATA PREPROCESSING SUMMARY
+==================================================
+
+Total events (raw): 900,050
+Events after crop: 457,874
+Events removed: 442,176 (49.1%)
+
+Grid cells: 286
+Active nodes: 133
+Graph edges: 5671
