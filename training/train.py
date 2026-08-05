@@ -82,6 +82,13 @@ def main(args):
         use_distance_weighting=True
     )
     adj_sparse = adj_builder.scipy_to_torch_sparse(adj_scipy, device=DEVICE)
+
+    from utils.manifest import write_run_manifest
+    output_dir = Path(CONFIG['output_dir'])
+    write_run_manifest(
+        output_dir, CONFIG, data=data, data_path=CONFIG['filename'],
+        adjacency=adj_scipy, stage='preprocessing_complete'
+    )
     
     # Get target feature indices
     all_features = CONFIG['features']
@@ -91,21 +98,21 @@ def main(args):
     # Create dataloaders
     train_dataset = SeismicDataset(
         data['train_data'],
+        target_data=data['train_target_data'],
         window_size=CONFIG['window_size'],
         horizon=CONFIG['horizon'],
-        target_indices=target_indices
     )
     val_dataset = SeismicDataset(
         data['val_data'],
+        target_data=data['val_target_data'],
         window_size=CONFIG['window_size'],
         horizon=CONFIG['horizon'],
-        target_indices=target_indices
     )
     test_dataset = SeismicDataset(
         data['test_data'],
+        target_data=data['test_target_data'],
         window_size=CONFIG['window_size'],
         horizon=CONFIG['horizon'],
-        target_indices=target_indices
     )
     
     # Create DataLoaders with reproducible shuffling
@@ -121,8 +128,10 @@ def main(args):
         'n_input_features': data['train_data'].shape[-1], 
         'n_target_features': len(target_features),
         'target_features': target_features,
-        'feature_stats': data['feature_stats'],  # For denormalization
-        'target_indices': target_indices,         # For target feature mapping
+        'feature_stats': data['feature_stats'],
+        'target_stats': data['target_stats'],
+        'target_indices': target_indices,         # Input-tensor indices for baselines
+        'split_timestamps': data['split_timestamps'],
     }
     
     print(f"   Train samples: {len(train_dataset)}")
@@ -255,11 +264,9 @@ def main(args):
         
         # Denormalize predictions and targets for proper metrics calculation
         print(" Denormalizing for metrics calculation...")
-        feature_stats = data['feature_stats']
-        
-        # Get target feature stats (slice based on target_features)
-        target_mean = feature_stats['mean'][target_indices]
-        target_std = feature_stats['std'][target_indices]
+        target_stats = data['target_stats']
+        target_mean = target_stats.get('offset', target_stats['mean'])
+        target_std = target_stats['std']
         
         print(f"   Target features: {data_info['target_features']}")
         print(f"   Mean: {target_mean}")
@@ -283,14 +290,14 @@ def main(args):
         
         # Calculate metrics on DENORMALIZED data
         metrics_calc = MetricsCalculator(feature_names=data_info['target_features'])
-        metrics = metrics_calc.calculate_all_metrics(targets_denorm, predictions_denorm, magnitude_idx=CONFIG.get('magnitude_idx', 1))
+        metrics = metrics_calc.calculate_all_metrics(targets_denorm, predictions_denorm, magnitude_idx=CONFIG.get('magnitude_idx', 0))
         metrics_calc.print_metrics(metrics)
         
         # Visualizations
         output_dir = Path(CONFIG['output_dir'])
         
         pred_viz = PredictionVisualizer(
-            feature_names=data['feature_names'],
+            feature_names=data_info['target_features'],
             save_dir=output_dir / 'figures'
         )
         pred_viz.plot_training_history(train_result['train_losses'], 
@@ -333,7 +340,14 @@ def main(args):
         # Save outputs
         save_all_outputs(
             output_dir, model, CONFIG, metrics, adj_scipy,
-            data['feature_stats'], data['node_info'], train_result
+            data['feature_stats'], data['node_info'], train_result,
+            target_stats=data['target_stats']
+        )
+        write_run_manifest(
+            output_dir, CONFIG, data=data, data_path=CONFIG['filename'],
+            adjacency=adj_scipy,
+            checkpoint_paths=[output_dir / 'models' / 'stgat_best.pth'],
+            stage='training_complete'
         )
         
         # ====================
@@ -389,11 +403,37 @@ def main(args):
         ensemble.fit(train_loader, val_loader, adj_sparse, criterion, CONFIG,
                     save_dir=output_dir / 'models')
         
-        # Generate predictions with uncertainty
+        # Estimate the calibration factor on validation only, then freeze it
+        # before evaluating the test set.
+        val_results = ensemble.generate_predictions(val_loader, adj_sparse)
         results = ensemble.generate_predictions(test_loader, adj_sparse)
+        low, high = 0.1, 20.0
+        for _ in range(50):
+            factor = (low + high) / 2.0
+            val_lower = val_results['mean'] - 1.96 * val_results['std'] * factor
+            val_upper = val_results['mean'] + 1.96 * val_results['std'] * factor
+            coverage = np.mean((val_results['targets'] >= val_lower) & (val_results['targets'] <= val_upper))
+            if coverage < 0.95:
+                low = factor
+            else:
+                high = factor
+        results['calibration_factor'] = factor
+        results['std_raw'] = results['std'].copy()
+        results['std'] = results['std'] * factor
+
+        target_offset = data['target_stats'].get('offset', data['target_stats']['mean'])
+        target_std = data['target_stats']['std']
+        target_offset = target_offset.reshape(1, 1, 1, -1)
+        target_std = target_std.reshape(1, 1, 1, -1)
+        for result in (val_results, results):
+            result['mean'] = result['mean'] * target_std + target_offset
+            result['targets'] = result['targets'] * target_std + target_offset
+            result['std'] = result['std'] * target_std
+        results['ci_lower'] = results['mean'] - 1.96 * results['std']
+        results['ci_upper'] = results['mean'] + 1.96 * results['std']
         
         # Calculate metrics
-        metrics_calc = MetricsCalculator(feature_names=data['feature_names'])
+        metrics_calc = MetricsCalculator(feature_names=data_info['target_features'])
         metrics = metrics_calc.calculate_all_metrics(
             results['targets'], results['mean'], results['std']
         )
@@ -401,7 +441,7 @@ def main(args):
         
         # Visualizations
         pred_viz = PredictionVisualizer(
-            feature_names=data['feature_names'],
+            feature_names=data_info['target_features'],
             save_dir=output_dir / 'figures'
         )
         pred_viz.plot_scatter_pred_vs_actual(results['targets'], results['mean'])

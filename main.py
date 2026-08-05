@@ -35,7 +35,7 @@ def main():
         if args.mode == "train":
             from training.train import main as train_main
             print("Starting default training mode...")
-            train_main()
+            train_main(argparse.Namespace(mode='train', print_config=False))
         elif args.mode == "multiresolution":
             from training.train_multiresolution import main as train_mr_main
             print("Starting multi-resolution training mode...")

@@ -70,6 +70,10 @@ class MultiHorizonPredictor:
         # Use base config with horizon=6
         mh_config = copy.deepcopy(self.config)
         mh_config['horizon'] = 6  # Predict 6 steps ahead
+        mh_hours = pd.Timedelta(mh_config['time_bin']).total_seconds() / 3600.0
+        mh_config['window_size'] = max(1, int(round(
+            mh_config.get('history_hours', 96) / mh_hours
+        )))
         
         # Preprocess using correct API
         preprocessor = DataPreprocessor(mh_config)
@@ -93,21 +97,21 @@ class MultiHorizonPredictor:
         # Create datasets
         train_dataset = SeismicDataset(
             data['train_data'],
+            target_data=data['train_target_data'],
             window_size=mh_config['window_size'],
             horizon=mh_config['horizon'],
-            target_indices=target_indices
         )
         val_dataset = SeismicDataset(
             data['val_data'],
+            target_data=data['val_target_data'],
             window_size=mh_config['window_size'],
             horizon=mh_config['horizon'],
-            target_indices=target_indices
         )
         test_dataset = SeismicDataset(
             data['test_data'],
+            target_data=data['test_target_data'],
             window_size=mh_config['window_size'],
             horizon=mh_config['horizon'],
-            target_indices=target_indices
         )
         
         # Create data loaders
@@ -119,7 +123,9 @@ class MultiHorizonPredictor:
             'in_features': data['train_data'].shape[-1],  # (T, N, F)
             'n_targets': len(target_indices),
             'config': mh_config,
-            'feature_stats': data['feature_stats']
+            'feature_stats': data['feature_stats'],
+            'target_stats': data['target_stats'],
+            'split_timestamps': data['split_timestamps']
         }
         
         print(f"   Num nodes: {self.data['num_nodes']}")
@@ -241,6 +247,9 @@ class MultiHorizonPredictor:
         # Find max_mw index in target features (usually index 1)
         target_features = self.data['config'].get('target_features', self.data['config']['features'])
         max_mw_idx = target_features.index('max_mw') if 'max_mw' in target_features else 0
+        target_stats = self.data['target_stats']
+        target_offset = float(target_stats.get('offset', target_stats['mean'])[0])
+        target_std = float(target_stats['std'][0])
         
         with torch.no_grad():
             for batch in tqdm(self.data['test_loader'], desc="Multi-Horizon Predicting"):
@@ -253,8 +262,8 @@ class MultiHorizonPredictor:
                 
                 # Store predictions for each horizon
                 for h in range(horizon):
-                    pred_h = outputs[:, h, :, max_mw_idx].cpu().numpy()
-                    target_h = y[:, h, :, max_mw_idx].cpu().numpy()
+                    pred_h = outputs[:, h, :, max_mw_idx].cpu().numpy() * target_std + target_offset
+                    target_h = y[:, h, :, max_mw_idx].cpu().numpy() * target_std + target_offset
                     
                     results[h]['predictions'].extend(pred_h.flatten().tolist())
                     results[h]['targets'].extend(target_h.flatten().tolist())
@@ -282,6 +291,7 @@ class MultiResolutionPredictor:
         self.models = {}
         self.data_cache = {}
         self.adj_cache = {}
+        self.canonical_split_timestamps = None
         
     def prepare_data(self, filepath):
         """Prepare data for each resolution."""
@@ -295,10 +305,18 @@ class MultiResolutionPredictor:
             res_config = copy.deepcopy(self.base_config)
             res_config['time_bin'] = res
             res_config['horizon'] = 1  # Single step prediction
+            res_hours = pd.Timedelta(res).total_seconds() / 3600.0
+            res_config['window_size'] = max(1, int(round(
+                res_config.get('history_hours', 96) / res_hours
+            )))
+            if self.canonical_split_timestamps is not None:
+                res_config['split_timestamps'] = self.canonical_split_timestamps
             
             # Preprocess
             preprocessor = DataPreprocessor(res_config)
             data = preprocessor.process(filepath)
+            if self.canonical_split_timestamps is None:
+                self.canonical_split_timestamps = data['split_timestamps']
             
             # Build adjacency
             adj_builder = AdjacencyBuilder(res_config)
@@ -318,21 +336,21 @@ class MultiResolutionPredictor:
             # Create datasets
             train_dataset = SeismicDataset(
                 data['train_data'],
+                target_data=data['train_target_data'],
                 window_size=res_config['window_size'],
                 horizon=res_config['horizon'],
-                target_indices=target_indices
             )
             val_dataset = SeismicDataset(
                 data['val_data'],
+                target_data=data['val_target_data'],
                 window_size=res_config['window_size'],
                 horizon=res_config['horizon'],
-                target_indices=target_indices
             )
             test_dataset = SeismicDataset(
                 data['test_data'],
+                target_data=data['test_target_data'],
                 window_size=res_config['window_size'],
                 horizon=res_config['horizon'],
-                target_indices=target_indices
             )
             
             self.data_cache[res] = {
@@ -342,7 +360,9 @@ class MultiResolutionPredictor:
                 'num_nodes': data['num_nodes'],
                 'in_features': data['train_data'].shape[-1],
                 'n_targets': len(target_indices),
-                'config': res_config
+                'config': res_config,
+                'target_stats': data['target_stats'],
+                'split_timestamps': data['split_timestamps']
             }
             self.adj_cache[res] = adj_sparse
             
@@ -471,6 +491,9 @@ class MultiResolutionPredictor:
             res_config = self.data_cache[res]['config']
             target_features = res_config.get('target_features', res_config['features'])
             max_mw_idx = target_features.index('max_mw') if 'max_mw' in target_features else 0
+            target_stats = self.data_cache[res]['target_stats']
+            target_offset = float(target_stats.get('offset', target_stats['mean'])[0])
+            target_std = float(target_stats['std'][0])
             
             predictions = []
             targets = []
@@ -485,8 +508,8 @@ class MultiResolutionPredictor:
                     outputs = model(x, adj_sparse)
                     
                     # Output shape: (B, 1, N, F)
-                    pred = outputs[:, 0, :, max_mw_idx].cpu().numpy()
-                    target = y[:, 0, :, max_mw_idx].cpu().numpy()
+                    pred = outputs[:, 0, :, max_mw_idx].cpu().numpy() * target_std + target_offset
+                    target = y[:, 0, :, max_mw_idx].cpu().numpy() * target_std + target_offset
                     
                     predictions.extend(pred.flatten().tolist())
                     targets.extend(target.flatten().tolist())

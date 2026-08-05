@@ -9,6 +9,7 @@ Updated with increased font sizes for all visualizations.
 import argparse
 import torch
 import numpy as np
+import pandas as pd
 from pathlib import Path
 import warnings
 import json
@@ -56,6 +57,8 @@ class MultiResolutionEnsemble:
         self.models = {}
         self.data_cache = {}
         self.feature_stats = {}
+        self.target_stats = {}
+        self.canonical_split_timestamps = None
         
     def prepare_data(self, filepath):
         from data.preprocessing import DataPreprocessor
@@ -72,9 +75,17 @@ class MultiResolutionEnsemble:
             res_config = copy.deepcopy(self.base_config)
             res_config['time_bin'] = res
             res_config['horizon'] = 1  
+            resolution_hours = pd.Timedelta(res).total_seconds() / 3600.0
+            res_config['window_size'] = max(1, int(round(
+                res_config.get('history_hours', 96) / resolution_hours
+            )))
+            if self.canonical_split_timestamps is not None:
+                res_config['split_timestamps'] = self.canonical_split_timestamps
             
             preprocessor = DataPreprocessor(res_config)
             data = preprocessor.process(filepath)
+            if self.canonical_split_timestamps is None:
+                self.canonical_split_timestamps = data['split_timestamps']
             
             adj_builder = AdjacencyBuilder(res_config)
             adj_scipy = adj_builder.build_distance_weighted_adj(
@@ -92,9 +103,9 @@ class MultiResolutionEnsemble:
             g = torch.Generator()
             g.manual_seed(res_config['seed'])
             
-            train_dataset = SeismicDataset(data['train_data'], window_size=res_config['window_size'], horizon=1, target_indices=target_indices)
-            val_dataset = SeismicDataset(data['val_data'], window_size=res_config['window_size'], horizon=1, target_indices=target_indices)
-            test_dataset = SeismicDataset(data['test_data'], window_size=res_config['window_size'], horizon=1, target_indices=target_indices)
+            train_dataset = SeismicDataset(data['train_data'], target_data=data['train_target_data'], window_size=res_config['window_size'], horizon=1)
+            val_dataset = SeismicDataset(data['val_data'], target_data=data['val_target_data'], window_size=res_config['window_size'], horizon=1)
+            test_dataset = SeismicDataset(data['test_data'], target_data=data['test_target_data'], window_size=res_config['window_size'], horizon=1)
             
             train_loader = DataLoader(train_dataset, batch_size=res_config['batch_size'], shuffle=True, generator=g)
             val_loader = DataLoader(val_dataset, batch_size=res_config['batch_size'], shuffle=False)
@@ -106,7 +117,9 @@ class MultiResolutionEnsemble:
                 'n_target_features': len(target_features),
                 'target_features': target_features,
                 'feature_stats': data['feature_stats'],
+                'target_stats': data['target_stats'],
                 'target_indices': target_indices,
+                'split_timestamps': data['split_timestamps'],
             }
             
             self.data_cache[res] = {
@@ -115,6 +128,7 @@ class MultiResolutionEnsemble:
                 'config': res_config, 'coords': adj_builder.coords,
             }
             self.feature_stats[res] = data['feature_stats']
+            self.target_stats[res] = data['target_stats']
 
     def train_all(self, output_dir):
         from models import STGAT
@@ -181,10 +195,9 @@ class MultiResolutionEnsemble:
             
             preds, targs = np.concatenate(preds, axis=0), np.concatenate(targs, axis=0)
             
-            f_stats = self.feature_stats[res]
-            t_idx = cache['data_info']['target_indices']
-            t_mean = f_stats['mean'][t_idx].reshape(1, 1, 1, -1)
-            t_std = f_stats['std'][t_idx].reshape(1, 1, 1, -1)
+            t_stats = self.target_stats[res]
+            t_mean = t_stats.get('offset', t_stats['mean']).reshape(1, 1, 1, -1)
+            t_std = t_stats['std'].reshape(1, 1, 1, -1)
             
             all_predictions[res] = preds * t_std + t_mean
             all_targets[res] = targs * t_std + t_mean
@@ -228,9 +241,9 @@ class MultiResolutionEnsemble:
                     targs.append(target.numpy())
             
             preds, targs = np.concatenate(preds, axis=0), np.concatenate(targs, axis=0)
-            f_stats = self.feature_stats[res]
-            t_idx = cache['data_info']['target_indices']
-            t_mean, t_std = f_stats['mean'][t_idx].reshape(1,1,1,-1), f_stats['std'][t_idx].reshape(1,1,1,-1)
+            t_stats = self.target_stats[res]
+            t_mean = t_stats.get('offset', t_stats['mean']).reshape(1, 1, 1, -1)
+            t_std = t_stats['std'].reshape(1, 1, 1, -1)
             
             combined_predictions[h_ahead] = (preds * t_std + t_mean).squeeze(1)
             combined_targets[h_ahead] = (targs * t_std + t_mean).squeeze(1)

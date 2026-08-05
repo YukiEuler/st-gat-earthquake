@@ -275,7 +275,8 @@ class AblationStudy:
         if ablation_config.get('model_type') == 'naive':
             baseline = NaiveBaseline(
                 horizon=self.config['horizon'],
-                out_features=data_info['n_target_features']
+                out_features=data_info['n_target_features'],
+                target_indices=data_info.get('target_indices')
             )
             return self._evaluate_baseline(baseline, test_loader, data_info)
         
@@ -283,7 +284,8 @@ class AblationStudy:
             baseline = MovingAverageBaseline(
                 window=5, 
                 horizon=self.config['horizon'],
-                out_features=data_info['n_target_features']
+                out_features=data_info['n_target_features'],
+                target_indices=data_info.get('target_indices')
             )
             return self._evaluate_baseline(baseline, test_loader, data_info)
         
@@ -291,7 +293,8 @@ class AblationStudy:
             baseline = ETASBaseline(
                 horizon=self.config['horizon'],
                 out_features=data_info['n_target_features'],
-                decay_p=ablation_config.get('decay_p', 1.2)
+                decay_p=ablation_config.get('decay_p', 1.2),
+                target_indices=data_info.get('target_indices')
             )
             return self._evaluate_baseline(baseline, test_loader, data_info)
         
@@ -536,16 +539,21 @@ class AblationStudy:
     
     def _denormalize(self, predictions, targets, data_info):
         """Denormalize predictions and targets to original scale."""
+        target_stats = data_info.get('target_stats')
         feature_stats = data_info.get('feature_stats')
         target_indices = data_info.get('target_indices')
         
-        if feature_stats is None or target_indices is None:
+        if target_stats is None and (feature_stats is None or target_indices is None):
             print("   Warning: feature_stats not available, using normalized metrics")
             return predictions, targets
         
         # Get target feature stats
-        target_mean = feature_stats['mean'][target_indices]
-        target_std = feature_stats['std'][target_indices]
+        if target_stats is not None:
+            target_mean = target_stats.get('offset', target_stats['mean'])
+            target_std = target_stats['std']
+        else:
+            target_mean = feature_stats['mean'][target_indices]
+            target_std = feature_stats['std'][target_indices]
         
         # Reshape for broadcasting: predictions shape is (B, H, N, F)
         n_dim = predictions.ndim

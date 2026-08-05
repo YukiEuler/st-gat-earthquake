@@ -8,6 +8,15 @@ import torch
 # MAIN CONFIGURATION
 # ==============================================================================
 CONFIG = {
+    # Canonical rerun protocol (revision plan)
+    'canonical_run_name': 'revision_canonical_v1',
+    'target_definition': 'raw_bin_max_mw',
+    'target_zero_preserving': True,
+    'split_mode': 'timestamp',
+    'history_hours': 96,
+    'active_nodes_fit_on_train': True,
+    'use_edge_weights': True,
+
     # Data
     'filename': 'Amatrice_CAT5.v20210504.csv',
     'grid_size': 0.015,           # ~1.11 km per cell
@@ -31,7 +40,7 @@ CONFIG = {
     'window_size': 24,          # Input: 24 jam ke belakang
     'horizon': 6,              # Output: 24 jam ke depan (multi-step)
     'train_ratio': 0.7,
-    'val_ratio': 0.1,
+    'val_ratio': 0.15,
     'mw_rolling_window': 3,
     
     # Rolling Aggregation for All Features
@@ -91,7 +100,7 @@ CONFIG = {
     
     # Loss Function Options
     # Options: 'weighted_mse', 'asymmetric', 'active_only', 'sparse_aware', 'focal', 'multiscale'
-    'loss_type': 'weighted_mse',  # Multi-scale loss for 6h, 12h, 24h predictions
+    'loss_type': 'multiscale',    # Multi-scale loss for 6h, 12h, 24h predictions
     'asymmetric_alpha': 0.8,      # Alpha for asymmetric loss (>0.5 = penalize underpredict more)
     'underpredict_penalty': 5.0,  # Extra penalty for underprediction (sparse_aware only)
     'magnitude_idx': 0,           # Index of max_mw in target features (now 0 since only max_mw)
@@ -102,9 +111,15 @@ CONFIG = {
     'multiscale_weights': [1.5, 1.75, 2.0], # Higher weight for longer horizons
     
     # Feature Transformation
-    'transform_magnitude': True,       # Apply log transform to max_mw
-    'add_running_features': True,      # Add running max/mean features
-    'add_engineered_features': True,  # Add b-value, event_rate, time_since_last (slow)
+    # These are input-only transformations. The forecast target is never
+    # transformed and is stored separately as raw_bin_max_mw.
+    'transform_magnitude': False,
+    'add_activity_mask': True,
+    'add_running_features': True,
+    'running_feature_window': 6,
+    # Optional exploratory features; disabled in the canonical rerun because
+    # they are low-priority and substantially slow the catalog preprocessing.
+    'add_engineered_features': False,
     
     # Uncertainty Estimation (Deep Ensembles)
     'n_ensemble_models': 5,
@@ -123,6 +138,10 @@ CONFIG = {
     # Random Seed
     'seed': 42,
 }
+
+# Keep an explicit activity indicator in the canonical input tensor.
+if CONFIG['add_activity_mask'] and 'activity_mask' not in CONFIG['features']:
+    CONFIG['features'] = CONFIG['features'] + ['activity_mask']
 
 # ==============================================================================
 # FEATURE DEFINITIONS

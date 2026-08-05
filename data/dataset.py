@@ -13,36 +13,43 @@ class SeismicDataset(Dataset):
     Mendukung multi-step forecasting dan feature selection.
     """
     
-    def __init__(self, data, window_size=24, horizon=24, 
-                 feature_indices=None, target_indices=None):
+    def __init__(self, data, window_size=24, horizon=24,
+                 feature_indices=None, target_indices=None, target_data=None):
         """
         Args:
             data: numpy array (T, N, F) - normalized features
             window_size: input window size (hours)
             horizon: prediction horizon (hours) 
             feature_indices: indices of features to use as input
-            target_indices: indices of features to predict
+            target_indices: indices of features to predict when ``target_data``
+                contains the full feature tensor
+            target_data: optional separate target tensor. This is required for
+                leakage-safe forecasting when input features contain rolling
+                context or transforms.
         """
         self.data = data
+        self.target_data = data if target_data is None else target_data
         self.window = window_size
         self.horizon = horizon
         self.feature_indices = feature_indices
         self.target_indices = target_indices
         
     def __len__(self):
+        if len(self.data) != len(self.target_data):
+            raise ValueError("Input and target tensors must have the same time length.")
         return len(self.data) - self.window - self.horizon + 1
     
     def __getitem__(self, idx):
         # Slice on-the-fly (lazy loading)
         x = self.data[idx : idx + self.window]  # (window, N, F)
-        y = self.data[idx + self.window : idx + self.window + self.horizon]  # (horizon, N, F)
+        y = self.target_data[idx + self.window : idx + self.window + self.horizon]
         
         # Feature selection for input
         if self.feature_indices is not None:
             x = x[:, :, self.feature_indices]
         
         # Target selection for output
-        if self.target_indices is not None:
+        if self.target_indices is not None and y.shape[-1] > max(self.target_indices, default=-1):
             y = y[:, :, self.target_indices]
         
         # Convert to tensor

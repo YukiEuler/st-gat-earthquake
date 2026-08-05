@@ -113,7 +113,7 @@ def plot_preprocessing_stages(df, output_dir):
                            alpha=0.3, s=2, vmin=0, vmax=5)
     ax1.set_xlabel('Longitude')
     ax1.set_ylabel('Latitude')
-    ax1.set_title(f'1. Data Original\n(n = {n_total:,} event)')
+    ax1.set_title(f'1. Original Data\n(n = {n_total:,} events)')
     plt.colorbar(scatter1, ax=ax1, label='Mw', shrink=0.8)
     
     # Draw crop box on original
@@ -127,8 +127,8 @@ def plot_preprocessing_stages(df, output_dir):
     # ===== Panel 2: Cropped vs Removed =====
     ax2 = axes[1]
     if len(df_removed) > 0:
-        ax2.scatter(df_removed['lon'], df_removed['lat'], c='gray', alpha=0.2, s=2, label=f'Dihapus: {n_removed:,}')
-    ax2.scatter(df_cropped['lon'], df_cropped['lat'], c='steelblue', alpha=0.5, s=2, label=f'Dipertahankan: {n_cropped:,}')
+        ax2.scatter(df_removed['lon'], df_removed['lat'], c='gray', alpha=0.2, s=2, label=f'Removed: {n_removed:,}')
+    ax2.scatter(df_cropped['lon'], df_cropped['lat'], c='steelblue', alpha=0.5, s=2, label=f'Retained: {n_cropped:,}')
     
     if lat_min and lon_min:
         rect = mpatches.Rectangle((lon_min, lat_min), lon_max - lon_min, lat_max - lat_min,
@@ -137,7 +137,7 @@ def plot_preprocessing_stages(df, output_dir):
     
     ax2.set_xlabel('Longitude')
     ax2.set_ylabel('Latitude')
-    ax2.set_title(f'2. Proses Cropping\n({n_removed:,} event dihapus, {n_cropped/n_total*100:.1f}% dipertahankan)')
+    ax2.set_title(f'2. Cropping Process\n({n_removed:,} events removed, {n_cropped/n_total*100:.1f}% retained)')
     ax2.legend(loc='upper right')
     
     # ===== Panel 3: Zoomed Cropped Area =====
@@ -148,7 +148,7 @@ def plot_preprocessing_stages(df, output_dir):
     ax3.set_ylim(lat_min - 0.01, lat_max + 0.01)
     ax3.set_xlabel('Longitude')
     ax3.set_ylabel('Latitude')
-    ax3.set_title(f'3. Area Studi (Zoom)\n(n = {n_cropped:,} event)')
+    ax3.set_title(f'3. Study Area (Zoom)\n(n = {n_cropped:,} events)')
     plt.colorbar(scatter3, ax=ax3, label='Mw', shrink=0.8)
     
     plt.tight_layout()
@@ -1236,7 +1236,7 @@ def plot_grid_and_graph(df_cropped, output_dir):
     ax1.set_ylim(lat_min - 0.01, lat_max + 0.01)
     ax1.set_xlabel('Longitude')
     ax1.set_ylabel('Latitude')
-    ax1.set_title(f'1. Struktur Grid\n({n_rows} × {n_cols} = {total_cells} sel, grid = {grid_size}°)')
+    ax1.set_title(f'1. Grid Structure\n({n_rows} × {n_cols} = {total_cells} cells, grid = {grid_size}°)')
     
     # ===== Panel 2: Active Nodes =====
     ax2 = axes[1]
@@ -1252,7 +1252,7 @@ def plot_grid_and_graph(df_cropped, output_dir):
     im = ax2.imshow(count_matrix, origin='lower', cmap='YlOrRd',
                     extent=[lon_min, lon_max, lat_min, lat_max],
                     aspect='auto')
-    plt.colorbar(im, ax=ax2, label='Jumlah Event', shrink=0.8)
+    plt.colorbar(im, ax=ax2, label='Event Count', shrink=0.8)
     
     # Highlight active nodes
     for node_id in active_nodes:
@@ -1263,7 +1263,7 @@ def plot_grid_and_graph(df_cropped, output_dir):
     
     ax2.set_xlabel('Longitude')
     ax2.set_ylabel('Latitude')
-    ax2.set_title(f'2. Node Aktif (≥ {min_events} event)\n({n_active} / {total_cells} node aktif)')
+    ax2.set_title(f'2. Active Nodes (≥ {min_events} events)\n({n_active} / {total_cells} active nodes)')
     
     # ===== Panel 3: Graph Structure =====
     ax3 = axes[2]
@@ -1308,7 +1308,7 @@ def plot_grid_and_graph(df_cropped, output_dir):
     ax3.set_ylim(lat_min - 0.01, lat_max + 0.01)
     ax3.set_xlabel('Longitude')
     ax3.set_ylabel('Latitude')
-    ax3.set_title(f'3. Struktur Graph\n({G.number_of_nodes()} node, {G.number_of_edges()} edge, radius = {radius_km} km)')
+    ax3.set_title(f'3. Graph Structure\n({G.number_of_nodes()} nodes, {G.number_of_edges()} edges, radius = {radius_km} km)')
     
     # Add colorbar for nodes
     sm = ScalarMappable(cmap='YlOrRd', norm=Normalize(vmin=min(node_colors), vmax=max(node_colors)))
@@ -1385,8 +1385,8 @@ def plot_spatial_with_basemap(df, output_dir):
             ax1.plot(lon, lat, 'k^', markersize=6, transform=ccrs.PlateCarree())
             ax1.text(lon + 0.05, lat + 0.05, city, fontsize=8, transform=ccrs.PlateCarree())
         
-        ax1.set_title('Konteks Geografis: Italia Tengah\n(Amatrice Sequence 2016-2017)')
-        plt.colorbar(scatter1, ax=ax1, label='Magnitudo (Mw)', shrink=0.7, pad=0.02)
+        ax1.set_title('Geographic Context: Central Italy\n(Amatrice Sequence 2016-2017)')
+        plt.colorbar(scatter1, ax=ax1, label='Magnitude (Mw)', shrink=0.7, pad=0.02)
         
         # Panel 2: Zoomed study area
         ax2 = fig.add_subplot(1, 2, 2, projection=ccrs.PlateCarree())
@@ -1421,9 +1421,9 @@ def plot_spatial_with_basemap(df, output_dir):
                     s=80, linewidths=2, transform=ccrs.PlateCarree(),
                     label=f'Mw ≥ 4.0 (n={len(df_sig)})')
         
-        ax2.set_title(f'Area Studi (Zoom)\nn = {len(df_study):,} event')
+        ax2.set_title(f'Study Area (Zoom)\nn = {len(df_study):,} events')
         ax2.legend(loc='upper right')
-        plt.colorbar(scatter2, ax=ax2, label='Magnitudo (Mw)', shrink=0.7, pad=0.02)
+        plt.colorbar(scatter2, ax=ax2, label='Magnitude (Mw)', shrink=0.7, pad=0.02)
         
         plt.tight_layout()
         plt.savefig(output_dir / 'figures' / 'spatial_real_map.png', dpi=150, bbox_inches='tight')
@@ -1443,7 +1443,7 @@ def plot_spatial_with_basemap(df, output_dir):
         if lat_min and lon_min:
             rect = mpatches.Rectangle((lon_min, lat_min), lon_max - lon_min, lat_max - lat_min,
                                        linewidth=2, edgecolor='blue', facecolor='none',
-                                       linestyle='-', label='Area Studi')
+                                       linestyle='-', label='Study Area')
             ax1.add_patch(rect)
         
         cities = {
@@ -1460,10 +1460,10 @@ def plot_spatial_with_basemap(df, output_dir):
         ax1.set_ylim(41.0, 44.0)
         ax1.set_xlabel('Longitude')
         ax1.set_ylabel('Latitude')
-        ax1.set_title('Konteks Geografis: Italia Tengah')
+        ax1.set_title('Geographic Context: Central Italy')
         ax1.legend(loc='upper left')
         ax1.set_aspect('equal')
-        plt.colorbar(scatter1, ax=ax1, label='Magnitudo (Mw)', shrink=0.7)
+        plt.colorbar(scatter1, ax=ax1, label='Magnitude (Mw)', shrink=0.7)
         
         # Panel 2: Zoomed area
         ax2 = axes[1]
@@ -1481,10 +1481,10 @@ def plot_spatial_with_basemap(df, output_dir):
         ax2.set_ylim(lat_min - 0.02, lat_max + 0.02)
         ax2.set_xlabel('Longitude')
         ax2.set_ylabel('Latitude')
-        ax2.set_title(f'Area Studi: Amatrice Sequence\n(n = {len(df_study):,} event)')
+        ax2.set_title(f'Study Area: Amatrice Sequence\n(n = {len(df_study):,} events)')
         ax2.legend(loc='upper right')
         ax2.set_aspect('equal')
-        plt.colorbar(scatter2, ax=ax2, label='Magnitudo (Mw)', shrink=0.7)
+        plt.colorbar(scatter2, ax=ax2, label='Magnitude (Mw)', shrink=0.7)
         
         plt.tight_layout()
         plt.savefig(output_dir / 'figures' / 'spatial_with_context.png', dpi=150, bbox_inches='tight')
@@ -1593,16 +1593,16 @@ def plot_magnitude_histogram(df, output_dir):
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     
     axes[0].hist(df['mw'], bins=50, edgecolor='black', alpha=0.7, color='steelblue')
-    axes[0].set_xlabel('Magnitudo (Mw)')
-    axes[0].set_ylabel('Frekuensi')
-    axes[0].set_title('Distribusi Magnitudo (Linear Scale)')
+    axes[0].set_xlabel('Magnitude (Mw)')
+    axes[0].set_ylabel('Frequency')
+    axes[0].set_title('Magnitude Distribution (Linear Scale)')
     axes[0].axvline(df['mw'].mean(), color='red', linestyle='--', label=f'Mean: {df["mw"].mean():.2f}')
     axes[0].legend()
     
     axes[1].hist(df['mw'], bins=50, edgecolor='black', alpha=0.7, color='steelblue')
-    axes[1].set_xlabel('Magnitudo (Mw)')
-    axes[1].set_ylabel('Frekuensi (log scale)')
-    axes[1].set_title('Distribusi Magnitudo (Log Scale)')
+    axes[1].set_xlabel('Magnitude (Mw)')
+    axes[1].set_ylabel('Frequency (log scale)')
+    axes[1].set_title('Magnitude Distribution (Log Scale)')
     axes[1].set_yscale('log')
     axes[1].axvline(df['mw'].mean(), color='red', linestyle='--', label=f'Mean: {df["mw"].mean():.2f}')
     axes[1].legend()
@@ -1630,9 +1630,9 @@ def plot_temporal_distribution(df, output_dir):
     # Daily count
     axes[0].fill_between(daily['date'], daily['count'], alpha=0.5, color='steelblue')
     axes[0].plot(daily['date'], daily['count'], color='steelblue', linewidth=0.5)
-    axes[0].set_xlabel('Tanggal')
-    axes[0].set_ylabel('Jumlah Event')
-    axes[0].set_title('Jumlah Event Gempa per Hari')
+    axes[0].set_xlabel('Date')
+    axes[0].set_ylabel('Event Count')
+    axes[0].set_title('Daily Earthquake Event Count')
     
     # Mark significant events
     mainshock_date = pd.Timestamp('2016-08-24')
@@ -1642,9 +1642,9 @@ def plot_temporal_distribution(df, output_dir):
     
     # Max magnitude per day
     axes[1].scatter(daily['date'], daily['max_mw'], alpha=0.5, s=15, c='indianred')
-    axes[1].set_xlabel('Tanggal')
-    axes[1].set_ylabel('Magnitudo Max (Mw)')
-    axes[1].set_title('Magnitudo Maksimum per Hari')
+    axes[1].set_xlabel('Date')
+    axes[1].set_ylabel('Max Magnitude (Mw)')
+    axes[1].set_title('Daily Maximum Magnitude')
     axes[1].axhline(y=4.0, color='orange', linestyle='--', alpha=0.7, label='Mw = 4.0')
     axes[1].axhline(y=5.0, color='red', linestyle='--', alpha=0.7, label='Mw = 5.0')
     axes[1].legend()
@@ -1665,9 +1665,9 @@ def plot_gutenberg_richter(df, output_dir):
     fig, ax = plt.subplots(figsize=(10, 6))
     
     ax.semilogy(mags, counts, 'o-', markersize=4, color='steelblue')
-    ax.set_xlabel('Magnitudo (Mw)')
-    ax.set_ylabel('Jumlah Event Kumulatif (≥ M)')
-    ax.set_title('Relasi Gutenberg-Richter')
+    ax.set_xlabel('Magnitude (Mw)')
+    ax.set_ylabel('Cumulative Event Count (≥ M)')
+    ax.set_title('Gutenberg-Richter Relation')
     ax.grid(True, alpha=0.3)
     
     # Fit for b-value

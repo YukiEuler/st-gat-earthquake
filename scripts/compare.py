@@ -66,6 +66,10 @@ def load_model_and_data():
     # Config for multi-horizon (same as compare_mr_mh.py)
     mh_config = copy.deepcopy(CONFIG)
     mh_config['horizon'] = 6  # Predicts 6 steps: 4h, 8h, 12h, 16h, 20h, 24h
+    mh_config['window_size'] = max(1, int(round(
+        mh_config.get('history_hours', 96) /
+        (pd.Timedelta(mh_config['time_bin']).total_seconds() / 3600.0)
+    )))
     
     # Preprocess
     print("   Loading data...")
@@ -90,9 +94,9 @@ def load_model_and_data():
     # Create test dataset
     test_dataset = SeismicDataset(
         data['test_data'],
+        target_data=data['test_target_data'],
         window_size=mh_config['window_size'],
         horizon=mh_config['horizon'],
-        target_indices=target_indices
     )
     test_loader = DataLoader(test_dataset, batch_size=mh_config['batch_size'], shuffle=False)
     

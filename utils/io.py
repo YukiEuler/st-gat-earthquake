@@ -11,7 +11,8 @@ from datetime import datetime
 
 
 def save_all_outputs(output_dir, model, config, metrics, adjacency, 
-                     feature_stats, node_info=None, train_result=None):
+                     feature_stats, node_info=None, train_result=None,
+                     target_stats=None):
     """Save all outputs to the output directory."""
     output_dir = Path(output_dir)
     
@@ -26,6 +27,7 @@ def save_all_outputs(output_dir, model, config, metrics, adjacency,
         'model_state_dict': model.state_dict(),
         'config': config,
         'feature_stats': feature_stats,
+        'target_stats': target_stats,
         'timestamp': datetime.now().isoformat(),
     }, model_path)
     print(f" Model saved: {model_path}")

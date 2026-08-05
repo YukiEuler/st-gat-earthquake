@@ -13,13 +13,15 @@ class SparseGATLayer(nn.Module):
     Supports sparse adjacency matrices for memory efficiency.
     """
     
-    def __init__(self, in_features, out_features, dropout=0.2, alpha=0.2, concat=True):
+    def __init__(self, in_features, out_features, dropout=0.2, alpha=0.2,
+                 concat=True, use_edge_weights=True):
         super(SparseGATLayer, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.dropout_rate = dropout
         self.alpha = alpha
         self.concat = concat
+        self.use_edge_weights = use_edge_weights
         
         # Q, K, V projections (Transformer-style)
         self.linear_q = nn.Linear(in_features, out_features, bias=False)
@@ -65,6 +67,7 @@ class SparseGATLayer(nn.Module):
         V = self.linear_v(x)
         
         edge_index = adj_sparse.indices()
+        edge_values = adj_sparse.values()
         src, dst = edge_index[0], edge_index[1]
         num_edges = src.size(0)
         
@@ -80,6 +83,11 @@ class SparseGATLayer(nn.Module):
             concat_qk_flat = concat_qk.view(batch_size * num_edges, -1)
             attention_logits = self.attention_layer(concat_qk_flat)
             attention_logits = attention_logits.view(batch_size, num_edges)
+
+            # The adjacency is not only a connectivity mask: its normalized
+            # Gaussian values now influence the attention prior.
+            if self.use_edge_weights:
+                attention_logits = attention_logits + torch.log(edge_values.clamp_min(1e-12)).view(1, -1)
             
             # Numerical stability
             attention_logits = attention_logits - attention_logits.max(dim=1, keepdim=True)[0]
@@ -112,6 +120,9 @@ class SparseGATLayer(nn.Module):
             
             concat_qk = torch.cat([Q_src, K_dst], dim=1)
             attention_logits = self.attention_layer(concat_qk).squeeze(1)
+
+            if self.use_edge_weights:
+                attention_logits = attention_logits + torch.log(edge_values.clamp_min(1e-12))
             
             attention_logits = attention_logits - attention_logits.max()
             attention_weights = torch.exp(attention_logits)
@@ -135,12 +146,13 @@ class SparseGATLayer(nn.Module):
 class MultiHeadGATLayer(nn.Module):
     """Multi-Head Graph Attention Layer."""
     
-    def __init__(self, in_features, out_features, num_heads=4, dropout=0.2, 
-                 alpha=0.2, concat=True):
+    def __init__(self, in_features, out_features, num_heads=4, dropout=0.2,
+                 alpha=0.2, concat=True, use_edge_weights=True):
         super(MultiHeadGATLayer, self).__init__()
         self.num_heads = num_heads
         self.concat = concat
         self.out_features = out_features
+        self.use_edge_weights = use_edge_weights
         
         if concat:
             assert out_features % num_heads == 0
@@ -149,7 +161,10 @@ class MultiHeadGATLayer(nn.Module):
             self.head_dim = out_features
         
         self.heads = nn.ModuleList([
-            SparseGATLayer(in_features, self.head_dim, dropout, alpha, concat=True)
+            SparseGATLayer(
+                in_features, self.head_dim, dropout, alpha,
+                concat=True, use_edge_weights=use_edge_weights
+            )
             for _ in range(num_heads)
         ])
     

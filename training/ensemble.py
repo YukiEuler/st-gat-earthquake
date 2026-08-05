@@ -72,6 +72,7 @@ class MultiResolutionDeepEnsemble:
         self.ensembles = {}  # {resolution: [model1, model2, ...]}
         self.data_cache = {}
         self.adj_cache = {}
+        self.canonical_split_timestamps = None
         
         # Random seeds for reproducibility
         self.seeds = [42, 123, 456, 789, 1024][:n_models]
@@ -81,10 +82,18 @@ class MultiResolutionDeepEnsemble:
         res_config = copy.deepcopy(self.base_config)
         res_config['time_bin'] = resolution
         res_config['horizon'] = 1  # Single step prediction
+        resolution_hours = pd.Timedelta(resolution).total_seconds() / 3600.0
+        res_config['window_size'] = max(1, int(round(
+            res_config.get('history_hours', 96) / resolution_hours
+        )))
+        if self.canonical_split_timestamps is not None:
+            res_config['split_timestamps'] = self.canonical_split_timestamps
         
         # Preprocess
         preprocessor = DataPreprocessor(res_config)
         data = preprocessor.process(filepath)
+        if self.canonical_split_timestamps is None:
+            self.canonical_split_timestamps = data['split_timestamps']
         
         # Build adjacency
         adj_builder = AdjacencyBuilder(res_config)
@@ -95,6 +104,14 @@ class MultiResolutionDeepEnsemble:
             use_distance_weighting=True
         )
         adj_sparse = adj_builder.scipy_to_torch_sparse(adj_scipy, device=self.device)
+
+        from utils.manifest import write_run_manifest
+        write_run_manifest(
+            Path(self.base_config.get('output_dir', 'outputs')) /
+            'deep_ensemble_multiresolution' / resolution,
+            res_config, data=data, data_path=filepath,
+            adjacency=adj_scipy, stage=f'{resolution}_preprocessing_complete'
+        )
         
         # Get target feature indices
         all_features = res_config['features']
@@ -104,32 +121,39 @@ class MultiResolutionDeepEnsemble:
         # Create datasets
         train_dataset = SeismicDataset(
             data['train_data'],
+            target_data=data['train_target_data'],
             window_size=res_config['window_size'],
             horizon=res_config['horizon'],
-            target_indices=target_indices
         )
         val_dataset = SeismicDataset(
             data['val_data'],
+            target_data=data['val_target_data'],
             window_size=res_config['window_size'],
             horizon=res_config['horizon'],
-            target_indices=target_indices
         )
         test_dataset = SeismicDataset(
             data['test_data'],
+            target_data=data['test_target_data'],
             window_size=res_config['window_size'],
             horizon=res_config['horizon'],
-            target_indices=target_indices
         )
         
+        loader_generator = torch.Generator()
+        loader_generator.manual_seed(res_config.get('seed', 42))
         self.data_cache[resolution] = {
-            'train_loader': DataLoader(train_dataset, batch_size=res_config['batch_size'], shuffle=True),
+            'train_loader': DataLoader(
+                train_dataset, batch_size=res_config['batch_size'],
+                shuffle=True, generator=loader_generator
+            ),
             'val_loader': DataLoader(val_dataset, batch_size=res_config['batch_size'], shuffle=False),
             'test_loader': DataLoader(test_dataset, batch_size=res_config['batch_size'], shuffle=False),
             'num_nodes': data['num_nodes'],
             'in_features': data['train_data'].shape[-1],
             'n_targets': len(target_indices),
             'config': res_config,
-            'feature_stats': data['feature_stats']
+            'feature_stats': data['feature_stats'],
+            'target_stats': data['target_stats'],
+            'split_timestamps': data['split_timestamps']
         }
         self.adj_cache[resolution] = adj_sparse
         
@@ -173,7 +197,7 @@ class MultiResolutionDeepEnsemble:
             print(f"\n   Training model {i+1}/{self.n_models} (seed={seed})...")
             set_seed(seed)
             
-            optimizer = torch.optim.Adam(model.parameters(), lr=self.base_config['lr'])
+            optimizer = torch.optim.Adam(model.parameters(), lr=self.base_config['learning_rate'])
             criterion = torch.nn.MSELoss()
             
             best_val_loss = float('inf')
@@ -245,7 +269,7 @@ class MultiResolutionDeepEnsemble:
                 
         print(f"   Loaded ensemble for {resolution}")
         
-    def predict_with_uncertainty(self, resolution):
+    def predict_with_uncertainty(self, resolution, split='test'):
         """
         Generate predictions with uncertainty for a resolution.
         
@@ -261,6 +285,7 @@ class MultiResolutionDeepEnsemble:
         target_features = res_config.get('target_features', res_config['features'])
         max_mw_idx = target_features.index('max_mw') if 'max_mw' in target_features else 0
         
+        loader = data[f'{split}_loader']
         all_predictions = []  # (n_models, n_samples)
         all_targets = []
         
@@ -270,7 +295,7 @@ class MultiResolutionDeepEnsemble:
             model_targets = []
             
             with torch.no_grad():
-                for batch in data['test_loader']:
+                for batch in loader:
                     x, y = batch
                     x = x.to(self.device)
                     y = y.to(self.device)
@@ -297,6 +322,16 @@ class MultiResolutionDeepEnsemble:
         ci_lower = mean_pred - 1.96 * std_pred
         ci_upper = mean_pred + 1.96 * std_pred
         
+        target_stats = data['target_stats']
+        target_mean = float(target_stats.get('offset', target_stats['mean'])[0])
+        target_std = float(target_stats['std'][0])
+        all_predictions = all_predictions * target_std + target_mean
+        all_targets = all_targets * target_std + target_mean
+        mean_pred = all_predictions.mean(axis=0)
+        std_pred = all_predictions.std(axis=0)
+        ci_lower = mean_pred - 1.96 * std_pred
+        ci_upper = mean_pred + 1.96 * std_pred
+
         return {
             'mean': mean_pred,
             'std': std_pred,
@@ -310,7 +345,7 @@ class MultiResolutionDeepEnsemble:
 # ==============================================================================
 # CALIBRATION
 # ==============================================================================
-def calibrate_uncertainty(results, target_coverage=95):
+def calibrate_uncertainty(validation_results, test_results, target_coverage=95):
     """
     Calibrate uncertainty estimates using empirical scaling.
     
@@ -318,16 +353,19 @@ def calibrate_uncertainty(results, target_coverage=95):
     This is a post-hoc calibration technique similar to temperature scaling.
     
     Args:
-        results: dict with mean, std, targets
+        validation_results: dict with validation mean, std, targets
+        test_results: dict with held-out test mean, std, targets
         target_coverage: target coverage percentage (default 95%)
         
     Returns:
         calibrated_results: dict with calibrated uncertainty
         calibration_factor: the scaling factor used
     """
-    mean = results['mean']
-    std = results['std']
-    targets = results['targets']
+    # Calibration factor is estimated from validation predictions only and
+    # then frozen before the test set is inspected.
+    mean = validation_results['mean']
+    std = validation_results['std']
+    targets = validation_results['targets']
     
     # Binary search for optimal scaling factor
     low, high = 0.1, 20.0
@@ -351,16 +389,17 @@ def calibrate_uncertainty(results, target_coverage=95):
             break
     
     calibration_factor = mid
-    calibrated_std = std * calibration_factor
+    calibrated_std = test_results['std'] * calibration_factor
+    test_mean = test_results['mean']
     
     return {
-        'mean': mean,
+        'mean': test_mean,
         'std': calibrated_std,
-        'std_raw': std,  # Keep original for comparison
-        'ci_lower': mean - 1.96 * calibrated_std,
-        'ci_upper': mean + 1.96 * calibrated_std,
-        'targets': targets,
-        'all_predictions': results.get('all_predictions', None),
+        'std_raw': test_results['std'],
+        'ci_lower': test_mean - 1.96 * calibrated_std,
+        'ci_upper': test_mean + 1.96 * calibrated_std,
+        'targets': test_results['targets'],
+        'all_predictions': test_results.get('all_predictions', None),
         'calibration_factor': calibration_factor
     }, calibration_factor
 
@@ -641,11 +680,14 @@ def main(args):
             ensemble.load_ensemble(res, output_dir / 'models')
             
             # Generate predictions with uncertainty
-            raw_results = ensemble.predict_with_uncertainty(res)
+            validation_results = ensemble.predict_with_uncertainty(res, split='val')
+            raw_results = ensemble.predict_with_uncertainty(res, split='test')
             all_results_raw[res] = raw_results
             
             # Apply calibration
-            calibrated_results, cal_factor = calibrate_uncertainty(raw_results, target_coverage=95)
+            calibrated_results, cal_factor = calibrate_uncertainty(
+                validation_results, raw_results, target_coverage=95
+            )
             all_results[res] = calibrated_results
             
             # Compute metrics

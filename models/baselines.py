@@ -11,9 +11,10 @@ import numpy as np
 class NaiveBaseline:
     """Naive baseline: predict last observation."""
     
-    def __init__(self, horizon=24, out_features=None):
+    def __init__(self, horizon=24, out_features=None, target_indices=None):
         self.horizon = horizon
         self.out_features = out_features  # Number of target features to predict
+        self.target_indices = target_indices
         self.name = "Naive (Last Observation)"
     
     def predict(self, x):
@@ -25,8 +26,9 @@ class NaiveBaseline:
         """
         last_obs = x[:, -1:, :, :]  # (B, 1, N, F)
         
-        # Only take the first out_features if specified
-        if self.out_features is not None:
+        if self.target_indices is not None:
+            last_obs = last_obs[..., self.target_indices]
+        elif self.out_features is not None:
             last_obs = last_obs[..., :self.out_features]
         
         return last_obs.repeat(1, self.horizon, 1, 1)
@@ -35,10 +37,11 @@ class NaiveBaseline:
 class MovingAverageBaseline:
     """Moving average baseline."""
     
-    def __init__(self, window=5, horizon=24, out_features=None):
+    def __init__(self, window=5, horizon=24, out_features=None, target_indices=None):
         self.window = window
         self.horizon = horizon
         self.out_features = out_features
+        self.target_indices = target_indices
         self.name = f"Moving Average (w={window})"
     
     def predict(self, x):
@@ -50,8 +53,9 @@ class MovingAverageBaseline:
         """
         avg = x[:, -self.window:, :, :].mean(dim=1, keepdim=True)  # (B, 1, N, F)
         
-        # Only take the first out_features if specified
-        if self.out_features is not None:
+        if self.target_indices is not None:
+            avg = avg[..., self.target_indices]
+        elif self.out_features is not None:
             avg = avg[..., :self.out_features]
         
         return avg.repeat(1, self.horizon, 1, 1)
@@ -296,8 +300,8 @@ class ETASBaseline:
     Note: This is a simplified version that uses empirical rates from data.
     """
     
-    def __init__(self, horizon=24, out_features=None, decay_p=1.2, 
-                 background_weight=0.3, triggered_weight=0.7):
+    def __init__(self, horizon=24, out_features=None, decay_p=1.2,
+                 background_weight=0.3, triggered_weight=0.7, target_indices=None):
         """
         Args:
             horizon: Prediction horizon (number of future time steps)
@@ -308,6 +312,7 @@ class ETASBaseline:
         """
         self.horizon = horizon
         self.out_features = out_features
+        self.target_indices = target_indices
         self.decay_p = decay_p
         self.background_weight = background_weight
         self.triggered_weight = triggered_weight
@@ -329,7 +334,9 @@ class ETASBaseline:
         batch_size, time_steps, nodes, features = x.size()
         
         # Get target features
-        if self.out_features is not None:
+        if self.target_indices is not None:
+            x_target = x[..., self.target_indices]
+        elif self.out_features is not None:
             x_target = x[..., :self.out_features]
         else:
             x_target = x

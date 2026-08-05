@@ -445,9 +445,9 @@ def main():
     # Create test loader
     test_dataset = SeismicDataset(
         data['test_data'],
+        target_data=data['test_target_data'],
         window_size=CONFIG['window_size'],
         horizon=CONFIG['horizon'],
-        target_indices=target_indices
     )
     test_loader = DataLoader(test_dataset, batch_size=CONFIG['batch_size'], shuffle=False)
     
@@ -482,6 +482,12 @@ def main():
     predictions, targets = generate_predictions(model, test_loader, adj_sparse, DEVICE)
     print(f"   Predictions shape: {predictions.shape}")
     print(f"   Targets shape: {targets.shape}")
+
+    # The model operates on normalized raw targets; report metrics in Mw.
+    target_mean = data['target_stats'].get('offset', data['target_stats']['mean']).reshape(1, 1, 1, -1)
+    target_std = data['target_stats']['std'].reshape(1, 1, 1, -1)
+    predictions = predictions * target_std + target_mean
+    targets = targets * target_std + target_mean
     
     # ====================
     # CALCULATE METRICS
