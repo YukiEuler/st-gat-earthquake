@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import json
+import re
 from pathlib import Path
 from tqdm.auto import tqdm
 
@@ -28,13 +29,24 @@ from data.preprocessing import DataPreprocessor
 from data.adjacency import AdjacencyBuilder
 from data.dataset import SeismicDataset
 from torch.utils.data import DataLoader
-from models import STGAT, STTFT
+from models import STGAT, STTFT, STGATMultiScale
 from evaluation.metrics import MetricsCalculator
 
 
 def detect_model_type(state_dict):
     """Auto-detect model type from state_dict keys."""
     keys = list(state_dict.keys())
+
+    # Multi-scale ST-GAT also contains LSTM keys, so this check must come
+    # before the generic STGAT/LSTM check below.
+    has_multiscale = any(
+        k.startswith('temporal_branches.')
+        or k.startswith('decoder.')
+        or k.startswith('fusion.')
+        for k in keys
+    )
+    if has_multiscale:
+        return 'stgat_multiscale'
     
     # Check for TFT-specific keys
     has_tft = any('temporal_encoder' in k for k in keys)
@@ -64,26 +76,131 @@ def load_model(model_path, model_kwargs, device):
         state_dict = checkpoint['model_state_dict']
     else:
         state_dict = checkpoint
+
+    saved_config = checkpoint.get('config', {}) if isinstance(checkpoint, dict) else {}
+    if not isinstance(saved_config, dict):
+        saved_config = {}
     
     # Auto-detect model type
     model_type = detect_model_type(state_dict)
     print(f"   Detected model type: {model_type.upper()}")
     
-    # Get input features from first layer weight shape
-    # For STTFT: gat_layers.0.heads.0.linear_q.weight shape is (head_dim, in_features)
-    first_layer_key = None
-    for k in state_dict.keys():
-        if 'gat_layers.0.heads.0.linear_q.weight' in k:
-            first_layer_key = k
-            break
-    
-    if first_layer_key:
-        in_features_checkpoint = state_dict[first_layer_key].shape[1]
-        print(f"   Checkpoint in_features: {in_features_checkpoint}")
-        model_kwargs['in_features'] = in_features_checkpoint
-    
-    # Create model based on detected type
-    if model_type == 'sttft':
+    # Restore dimensions from the checkpoint rather than treating the
+    # effective GAT input (raw features + node embedding) as raw features.
+    # The reported checkpoint value 26 is 10 data features + 16 node embeds.
+    model_kwargs = dict(model_kwargs)
+    model_kwargs['hidden_dim'] = saved_config.get('hidden_dim', model_kwargs['hidden_dim'])
+    model_kwargs['horizon'] = saved_config.get('horizon', model_kwargs['horizon'])
+    model_kwargs['num_gat_layers'] = saved_config.get(
+        'num_gat_layers', model_kwargs['num_gat_layers']
+    )
+    model_kwargs['num_heads'] = saved_config.get('num_heads', model_kwargs['num_heads'])
+    model_kwargs['dropout'] = saved_config.get('dropout', model_kwargs['dropout'])
+
+    keys = list(state_dict.keys())
+    node_embedding = state_dict.get('node_embedding.weight')
+    node_embed_dim = int(node_embedding.shape[1]) if node_embedding is not None else 0
+    if node_embedding is not None:
+        model_kwargs['num_nodes'] = int(node_embedding.shape[0])
+    model_kwargs['node_embed_dim'] = node_embed_dim
+
+    if model_type in {'stgat', 'stgat_multiscale'}:
+        input_proj = state_dict.get('input_proj.weight')
+        if input_proj is None:
+            raise RuntimeError('Checkpoint tidak memiliki input_proj.weight.')
+
+        effective_in_features = int(input_proj.shape[1])
+        in_features_checkpoint = effective_in_features - node_embed_dim
+        print(f"   Checkpoint raw input features: {in_features_checkpoint}")
+        print(f"   Checkpoint node embedding dim: {node_embed_dim}")
+
+        if in_features_checkpoint != model_kwargs['in_features']:
+            raise ValueError(
+                'Jumlah fitur input tidak cocok: '
+                f"data saat evaluasi={model_kwargs['in_features']}, "
+                f"checkpoint={in_features_checkpoint}. "
+                'Gunakan preprocessing/config yang sama saat training dan evaluasi.'
+            )
+
+        model_kwargs['hidden_dim'] = int(input_proj.shape[0])
+
+        gat_layer_ids = {
+            int(match.group(1))
+            for key in keys
+            for match in [re.search(r'^gat_layers\.(\d+)\.', key)]
+            if match
+        }
+        if gat_layer_ids:
+            model_kwargs['num_gat_layers'] = len(gat_layer_ids)
+
+        first_q = state_dict.get('gat_layers.0.heads.0.linear_q.weight')
+        if first_q is not None:
+            head_dim = int(first_q.shape[0])
+            model_kwargs['num_heads'] = max(1, model_kwargs['hidden_dim'] // head_dim)
+            model_kwargs['use_attention'] = True
+            model_kwargs['use_multihead'] = model_kwargs['num_heads'] > 1
+        else:
+            model_kwargs['use_attention'] = False
+            model_kwargs['use_multihead'] = False
+
+    # Create model based on detected type.
+    if model_type == 'stgat_multiscale':
+        branch_ids = {
+            int(match.group(1))
+            for key in keys
+            for match in [re.search(r'^temporal_branches\.(\d+)\.', key)]
+            if match
+        }
+        scales = saved_config.get(
+            'multiscale_scales', CONFIG.get('multiscale_scales', [1, 2, 4])
+        )
+        if len(scales) != len(branch_ids):
+            raise ValueError(
+                f"Jumlah scale tidak cocok: checkpoint memiliki {len(branch_ids)} "
+                f"branch, konfigurasi memiliki {len(scales)} scale."
+            )
+
+        decoder_horizon = state_dict.get('decoder.horizon_embed.weight')
+        decoder_output = state_dict.get('decoder.output_proj.3.weight')
+        if decoder_horizon is not None:
+            model_kwargs['horizon'] = int(decoder_horizon.shape[0])
+        if decoder_output is not None:
+            model_kwargs['out_features'] = int(decoder_output.shape[0])
+
+        model = STGATMultiScale(
+            num_nodes=model_kwargs['num_nodes'],
+            in_features=model_kwargs['in_features'],
+            hidden_dim=model_kwargs['hidden_dim'],
+            out_features=model_kwargs['out_features'],
+            horizon=model_kwargs['horizon'],
+            num_gat_layers=model_kwargs['num_gat_layers'],
+            num_heads=model_kwargs['num_heads'],
+            dropout=model_kwargs['dropout'],
+            scales=scales,
+            fusion_type=saved_config.get(
+                'multiscale_fusion', CONFIG.get('multiscale_fusion', 'concat')
+            ),
+            use_attention=model_kwargs.get('use_attention', True),
+            use_multihead=model_kwargs.get('use_multihead', True),
+            node_embed_dim=model_kwargs['node_embed_dim'],
+            pool_type='avg',
+        ).to(device)
+    elif model_type == 'sttft':
+        # STTFT has no node embedding; its GAT input is already the raw
+        # feature count from preprocessing.
+        first_layer_key = next(
+            (k for k in keys if 'gat_layers.0.heads.0.linear_q.weight' in k),
+            None,
+        )
+        if first_layer_key:
+            in_features_checkpoint = int(state_dict[first_layer_key].shape[1])
+            print(f"   Checkpoint raw input features: {in_features_checkpoint}")
+            if in_features_checkpoint != model_kwargs['in_features']:
+                raise ValueError(
+                    f"Jumlah fitur input tidak cocok: data={model_kwargs['in_features']}, "
+                    f"checkpoint={in_features_checkpoint}."
+                )
+
         # STTFT might have additional kwargs
         sttft_kwargs = {
             'num_nodes': model_kwargs['num_nodes'],
@@ -93,11 +210,17 @@ def load_model(model_path, model_kwargs, device):
             'horizon': model_kwargs['horizon'],
             'num_gat_layers': model_kwargs['num_gat_layers'],
             'num_heads': model_kwargs['num_heads'],
-            'tft_layers': CONFIG.get('tft_layers', 2),
+            'tft_layers': saved_config.get('tft_layers', CONFIG.get('tft_layers', 2)),
             'dropout': model_kwargs['dropout'],
         }
         model = STTFT(**sttft_kwargs).to(device)
     else:
+        model_kwargs['use_skip'] = 'skip_temporal_proj.weight' in state_dict
+        fc_out = state_dict.get('fc_out.3.weight')
+        if fc_out is not None and model_kwargs['out_features']:
+            model_kwargs['horizon'] = int(
+                fc_out.shape[0] // model_kwargs['out_features']
+            )
         model = STGAT(**model_kwargs).to(device)
     
     # Load state dict

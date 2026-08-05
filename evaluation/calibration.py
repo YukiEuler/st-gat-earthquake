@@ -30,6 +30,7 @@ from data.dataset import SeismicDataset
 from torch.utils.data import DataLoader
 from models import STGAT, STTFT
 from evaluation.metrics import MetricsCalculator
+from evaluation.evaluate import load_model as load_evaluation_model
 
 
 PLOT_FONT_SIZES = {
@@ -491,7 +492,10 @@ def main():
     model_path = Path(CONFIG['output_dir']) / 'models' / 'stgat_best.pth'
     print(f"   Model path: {model_path}")
     
-    model, model_type = load_model(model_path, model_kwargs, DEVICE)
+    # Reuse the canonical evaluator loader so multi-scale checkpoints and
+    # effective input features (raw features + node embeddings) are handled
+    # consistently.
+    model, model_type = load_evaluation_model(model_path, model_kwargs, DEVICE)
     
     # ====================
     # GENERATE PREDICTIONS
