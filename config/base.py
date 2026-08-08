@@ -9,7 +9,7 @@ import torch
 # ==============================================================================
 CONFIG = {
     # Canonical rerun protocol (revision plan)
-    'canonical_run_name': 'revision_canonical_v3_hurdle',
+    'canonical_run_name': 'revision_canonical_v4_tailaware',
     'target_definition': 'raw_bin_max_mw',
     'auxiliary_target_definition': 'raw_bin_activity_indicator',
     'target_zero_preserving': True,
@@ -121,19 +121,29 @@ CONFIG = {
     # forecast P(activity) * E[Mw | activity].
     'model_output_features': 2,
     'hurdle_primary_prediction': 'expected',
+    # 0.5 is only a safe fallback. Canonical v4 fits the event operating
+    # point on validation predictions and freezes it before test evaluation.
     'hurdle_activity_threshold': 0.5,
+    'hurdle_activity_threshold_mode': 'validation_f1',
+    'hurdle_activity_threshold_objective': 'f1',
+    'hurdle_activity_threshold_min': 0.05,
+    'hurdle_activity_threshold_max': 0.95,
     'hurdle_calibrate_activity_bias_on_validation': True,
     'hurdle_activity_loss_weight': 1.0,
-    'hurdle_magnitude_loss_weight': 1.0,
-    'hurdle_expected_value_loss_weight': 1.0,
-    'hurdle_smooth_l1_beta': 0.5,
+    'hurdle_magnitude_loss_weight': 1.25,
+    'hurdle_expected_value_loss_weight': 0.75,
+    'hurdle_smooth_l1_beta': 0.75,
     # Keep None for probability calibration. Class-balancing the BCE would
     # change the probability scale and recreate the positive-forecast bias.
     'hurdle_activity_pos_weight': None,
-    # Rare-event weighting is deliberately disabled for the primary run.
-    # Threshold skill is reported separately instead of distorting RMSE/R2.
-    'hurdle_magnitude_event_thresholds': [],
-    'hurdle_magnitude_event_weights': [],
+    # Bounded tail emphasis applies only to the conditional magnitude head.
+    # Weights are normalized within each active batch, so they cannot recreate
+    # the global positive-forecast bias seen in canonical v2.
+    'hurdle_magnitude_event_thresholds': [1.0, 2.0],
+    'hurdle_magnitude_event_weights': [1.5, 3.0],
+    'hurdle_normalize_magnitude_weights': True,
+    'hurdle_max_magnitude_weight': 3.0,
+    'hurdle_tail_underprediction_multiplier': 1.25,
     'asymmetric_alpha': 0.8,      # Alpha for asymmetric loss (>0.5 = penalize underpredict more)
     'underpredict_penalty': 2.0,
     'magnitude_idx': 0,           # Index of max_mw in target features (now 0 since only max_mw)
@@ -156,7 +166,13 @@ CONFIG = {
     
     # Uncertainty Estimation (Deep Ensembles)
     'n_ensemble_models': 5,
-    'uncertainty_enabled': True,
+    # Default train mode produces one deterministic checkpoint. Enable this
+    # only after the hurdle-compatible ensemble pipeline is run separately.
+    'uncertainty_enabled': False,
+    'uncertainty_mode': 'deterministic_single_checkpoint',
+
+    # Leakage-safe reference forecasts written beside the model metrics.
+    'baseline_recent_window': 6,  # 6 x 4h = 24h
     
     # Optional Features
     'hyperparameter_tuning': False,  # Set True untuk Optuna tuning
@@ -164,7 +180,7 @@ CONFIG = {
     'n_cv_splits': 5,
     
     # Output
-    'output_dir': 'outputs/revision_canonical_v3',
+    'output_dir': 'outputs/revision_canonical_v4',
     'save_figures': True,
     'save_attention': True,
     

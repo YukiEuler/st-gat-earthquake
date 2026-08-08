@@ -31,7 +31,7 @@ Configuration: `config/config_event.py`
 
 - **`trainer.py`** - Base Trainer class with training loop
 - **`losses.py`** - Custom loss functions
-- **`hurdle.py`** - Activity/magnitude decoding and validation-only logit-bias calibration
+- **`hurdle.py`** - Activity/magnitude decoding plus validation-only logit-bias and threshold fitting
 - **`uncertainty.py`** - Uncertainty quantification methods
 - **`cross_validation.py`** - K-fold and cross-validation utilities
 
@@ -51,6 +51,8 @@ from training.train_multiresolution import main
 
 ## Output
 
-The canonical run is saved to `outputs/revision_canonical_v3/`. Its CSV keeps
+The canonical run is saved to `outputs/revision_canonical_v4/`. Its CSV keeps
 the primary expected Mw forecast plus activity probability, conditional Mw,
-and thresholded Mw for diagnostics.
+and validation-thresholded event Mw. `metrics/forecast_comparison.csv` compares
+the two model views with zero, persistence, recent-mean, and train-only
+climatology baselines.

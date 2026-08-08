@@ -234,6 +234,15 @@ def main(args):
                 ),
                 target_scale=target_scale,
                 target_offset=target_offset,
+                normalize_magnitude_weights=CONFIG.get(
+                    'hurdle_normalize_magnitude_weights', True
+                ),
+                max_magnitude_weight=CONFIG.get(
+                    'hurdle_max_magnitude_weight'
+                ),
+                tail_underprediction_multiplier=CONFIG.get(
+                    'hurdle_tail_underprediction_multiplier', 1.0
+                ),
             )
         elif loss_type == 'asymmetric':
             criterion = AsymmetricMSELoss(
@@ -293,14 +302,24 @@ def main(args):
         trainer = Trainer(model, criterion, CONFIG, DEVICE)
         train_result = trainer.fit(train_loader, val_loader, adj_sparse)
 
-        # Calibrate only an activity-logit intercept on validation. This
-        # corrects prevalence bias without touching the test targets or
-        # changing the conditional magnitude head.
+        # Calibrate the activity head and select its decision threshold using
+        # validation predictions only. Test labels are never consulted.
         activity_logit_bias = 0.0
-        if use_hurdle and CONFIG.get(
-            'hurdle_calibrate_activity_bias_on_validation', True
-        ):
-            from training.hurdle import fit_activity_logit_bias
+        activity_threshold = float(CONFIG.get('hurdle_activity_threshold', 0.5))
+        threshold_details = {
+            'source': 'fixed_config',
+            'threshold': activity_threshold,
+        }
+        threshold_mode = CONFIG.get(
+            'hurdle_activity_threshold_mode', 'fixed'
+        )
+        needs_validation_outputs = use_hurdle and (
+            CONFIG.get('hurdle_calibrate_activity_bias_on_validation', True)
+            or threshold_mode != 'fixed'
+        )
+        validation_outputs = None
+        validation_targets = None
+        if needs_validation_outputs:
             validation_outputs = []
             validation_targets = []
             model.eval()
@@ -313,6 +332,11 @@ def main(args):
                     validation_targets.append(batch_target.numpy())
             validation_outputs = np.concatenate(validation_outputs, axis=0)
             validation_targets = np.concatenate(validation_targets, axis=0)
+
+        if use_hurdle and CONFIG.get(
+            'hurdle_calibrate_activity_bias_on_validation', True
+        ):
+            from training.hurdle import fit_activity_logit_bias
             activity_logit_bias = fit_activity_logit_bias(
                 validation_outputs[..., 1:2],
                 validation_targets[..., 1:2],
@@ -322,8 +346,43 @@ def main(args):
                 f"logit bias={activity_logit_bias:.6f}"
             )
 
+        if use_hurdle and threshold_mode != 'fixed':
+            if threshold_mode not in {'validation_f1', 'validation_balanced_accuracy'}:
+                raise ValueError(
+                    "hurdle_activity_threshold_mode must be 'fixed', "
+                    "'validation_f1', or 'validation_balanced_accuracy'."
+                )
+            from training.hurdle import fit_activity_threshold
+            validation_logit = (
+                validation_outputs[..., 1:2] + activity_logit_bias
+            )
+            validation_probability = 1.0 / (
+                1.0 + np.exp(-np.clip(validation_logit, -60.0, 60.0))
+            )
+            objective = CONFIG.get(
+                'hurdle_activity_threshold_objective',
+                'f1' if threshold_mode == 'validation_f1'
+                else 'balanced_accuracy',
+            )
+            activity_threshold, threshold_details = fit_activity_threshold(
+                validation_probability,
+                validation_targets[..., 1:2],
+                objective=objective,
+                minimum=CONFIG.get('hurdle_activity_threshold_min', 0.05),
+                maximum=CONFIG.get('hurdle_activity_threshold_max', 0.95),
+            )
+            print(
+                " Validation-only activity threshold: "
+                f"{activity_threshold:.6f} "
+                f"({objective}={threshold_details['objective_score']:.4f}, "
+                f"precision={threshold_details['precision']:.4f}, "
+                f"recall={threshold_details['recall']:.4f})"
+            )
+
         effective_config = dict(CONFIG)
         effective_config['fitted_activity_logit_bias'] = float(activity_logit_bias)
+        effective_config['fitted_activity_threshold'] = float(activity_threshold)
+        effective_config['fitted_activity_threshold_details'] = threshold_details
         
         # Generate predictions
         print("\n Generating predictions...")
@@ -348,7 +407,7 @@ def main(args):
             targets, activity_targets = split_hurdle_targets(packed_targets)
             hurdle_outputs = decode_hurdle_numpy(
                 raw_predictions,
-                activity_threshold=CONFIG.get('hurdle_activity_threshold', 0.5),
+                activity_threshold=activity_threshold,
                 activity_logit_bias=activity_logit_bias,
             )
             primary_prediction = CONFIG.get(
@@ -362,7 +421,7 @@ def main(args):
             print(
                 "   Hurdle decoding: "
                 f"primary={primary_prediction}, "
-                f"activity threshold={CONFIG.get('hurdle_activity_threshold', 0.5):.2f}"
+                f"activity threshold={activity_threshold:.4f}"
             )
         else:
             predictions = raw_predictions
@@ -420,7 +479,7 @@ def main(args):
             metrics['activity_detection'] = metrics_calc.calculate_activity_metrics(
                 activity_targets,
                 hurdle_denorm['activity_probability'],
-                threshold=CONFIG.get('hurdle_activity_threshold', 0.5),
+                threshold=activity_threshold,
             )
             active_entries = np.broadcast_to(
                 activity_targets >= 0.5, targets_denorm.shape
@@ -431,12 +490,88 @@ def main(args):
                     hurdle_denorm['conditional'][active_entries],
                 )
             )
-            metrics['thresholded_point_forecast'] = (
-                metrics_calc.calculate_regression_metrics(
-                    targets_denorm,
-                    hurdle_denorm['thresholded'],
-                    activity_mask=activity_targets,
-                )
+            conditional_diagnostics = metrics_calc.calculate_forecast_diagnostics(
+                targets_denorm[active_entries],
+                hurdle_denorm['conditional'][active_entries],
+            )
+            metrics['conditional_magnitude_active_diagnostics'] = (
+                conditional_diagnostics
+            )
+            expected_regression = metrics_calc.calculate_regression_metrics(
+                targets_denorm,
+                hurdle_denorm['expected'],
+                activity_mask=activity_targets,
+            )
+            event_regression = metrics_calc.calculate_regression_metrics(
+                targets_denorm,
+                hurdle_denorm['thresholded'],
+                activity_mask=activity_targets,
+            )
+            metrics['forecast_views'] = {
+                'expected_magnitude': {
+                    'interpretation': (
+                        'P(activity) times conditional Mw; primary squared-error forecast.'
+                    ),
+                    'regression': expected_regression,
+                    'diagnostics': metrics_calc.calculate_forecast_diagnostics(
+                        targets_denorm, hurdle_denorm['expected']
+                    ),
+                },
+                'event_magnitude': {
+                    'interpretation': (
+                        'Conditional Mw when validation-fitted activity decision is positive; '
+                        'zero otherwise.'
+                    ),
+                    'activity_threshold': float(activity_threshold),
+                    'regression': event_regression,
+                    'diagnostics': metrics_calc.calculate_forecast_diagnostics(
+                        targets_denorm, hurdle_denorm['thresholded']
+                    ),
+                },
+            }
+            # Backward-compatible alias used by older report scripts.
+            metrics['thresholded_point_forecast'] = event_regression
+
+            from evaluation.baselines import (
+                evaluate_forecast_comparison,
+                generate_reference_forecasts,
+            )
+            reference_forecasts = generate_reference_forecasts(
+                data['test_target_data'],
+                data['train_target_data'],
+                data['target_stats'],
+                window_size=CONFIG['window_size'],
+                horizon=CONFIG['horizon'],
+                recent_window=CONFIG.get('baseline_recent_window', 6),
+                test_activity_series=data['test_target_activity'],
+                train_activity_series=data['train_target_activity'],
+            )
+            forecast_set = {
+                'stgat_expected': {
+                    'kind': 'model_primary',
+                    'description': 'Canonical ST-GAT expected-magnitude forecast.',
+                    'prediction': hurdle_denorm['expected'],
+                    'activity_probability': hurdle_denorm['activity_probability'],
+                    'activity_threshold': float(activity_threshold),
+                },
+                'stgat_event_thresholded': {
+                    'kind': 'model_event_view',
+                    'description': (
+                        'Canonical ST-GAT hard event forecast using validation threshold.'
+                    ),
+                    'prediction': hurdle_denorm['thresholded'],
+                    'activity_probability': hurdle_denorm['activity_probability'],
+                    'activity_threshold': float(activity_threshold),
+                },
+                **reference_forecasts,
+            }
+            metrics['forecast_comparison'] = evaluate_forecast_comparison(
+                targets_denorm,
+                forecast_set,
+                activity_target=activity_targets,
+                feature_names=data_info['target_features'],
+                magnitude_idx=CONFIG.get('magnitude_idx', 0),
+                primary_name='stgat_expected',
             )
         metrics_calc.print_metrics(metrics)
         
@@ -460,7 +595,12 @@ def main(args):
                 hurdle_denorm['activity_probability'],
                 targets_denorm,
                 hurdle_denorm['conditional'],
-                threshold=CONFIG.get('hurdle_activity_threshold', 0.5),
+                threshold=activity_threshold,
+            )
+            pred_viz.plot_scatter_pred_vs_actual(
+                targets_denorm,
+                hurdle_denorm['thresholded'],
+                save_name='scatter_event_pred_vs_actual',
             )
         
         # Plot predictions at most active node
@@ -469,6 +609,14 @@ def main(args):
                                        activity_mask=activity_targets,
                                        horizon_idx=0,
                                        save_name='most_active_node_prediction')
+        if hurdle_denorm is not None:
+            pred_viz.plot_most_active_node(
+                targets_denorm,
+                hurdle_denorm['thresholded'],
+                activity_mask=activity_targets,
+                horizon_idx=0,
+                save_name='most_active_node_event_prediction',
+            )
         
         # Attention visualization
         if CONFIG.get('save_attention', True):
@@ -492,6 +640,14 @@ def main(args):
         )
         spatial_viz.plot_spatial_heatmap(targets, predictions)
         spatial_viz.plot_node_activity(targets)
+
+        if metrics.get('forecast_comparison'):
+            from evaluation.baselines import save_forecast_comparison_csv
+            comparison_path = save_forecast_comparison_csv(
+                metrics['forecast_comparison'],
+                output_dir / 'metrics' / 'forecast_comparison.csv',
+            )
+            print(f" Forecast comparison saved: {comparison_path}")
         
         # Save outputs
         save_all_outputs(
@@ -516,6 +672,7 @@ def main(args):
             data_info['target_features'], output_dir,
             activity_targets=activity_targets,
             hurdle_outputs=hurdle_denorm,
+            activity_threshold=activity_threshold,
         )
         
         html_path = output_dir / 'predictions_viewer.html'
@@ -674,7 +831,7 @@ def main(args):
 
 def generate_regression_predictions_csv(
         predictions, targets, feature_names, output_dir,
-        activity_targets=None, hurdle_outputs=None):
+        activity_targets=None, hurdle_outputs=None, activity_threshold=None):
     """Generate predictions CSV for regression model."""
     import pandas as pd
     
@@ -698,9 +855,14 @@ def generate_regression_predictions_csv(
                         activity_targets[b, h, n, 0] >= 0.5
                     )
                 if hurdle_outputs is not None:
-                    row['activity_probability'] = float(
+                    probability = float(
                         hurdle_outputs['activity_probability'][b, h, n, 0]
                     )
+                    row['activity_probability'] = probability
+                    if activity_threshold is not None:
+                        row['activity_decision'] = int(
+                            probability >= float(activity_threshold)
+                        )
                     row['max_mw_pred_conditional'] = float(
                         hurdle_outputs['conditional'][b, h, n, 0]
                     )

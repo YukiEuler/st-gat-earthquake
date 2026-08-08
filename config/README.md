@@ -129,10 +129,15 @@ from my_config import MY_CONFIG
 
 ### Loss & Metrics
 
-The canonical v3 run uses `loss_type='hurdle'`. The model learns an activity
+The canonical v4 run uses `loss_type='hurdle'`. The model learns an activity
 logit and a conditional raw-Mw estimate; the primary point prediction is
-`P(activity) * E[Mw | activity]`. Activity-logit bias is fitted on validation
-only. Dynamic active/rare-event weighting is not used for the primary run.
+`P(activity) * E[Mw | activity]`. Activity-logit bias and the hard event
+threshold are fitted on validation only. Bounded, batch-normalized tail
+weighting is confined to active-bin conditional magnitude loss.
+
+Default training is deterministic, so `uncertainty_enabled=False`. Do not
+report uncertainty unless a compatible multi-checkpoint ensemble is trained
+and calibrated separately.
 
 ## Environment Variables
 

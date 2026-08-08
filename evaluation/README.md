@@ -44,6 +44,15 @@ Entry point for comprehensive model evaluation:
 - Prediction visualization
 - Error analysis
 
+Canonical v4 also writes a common forecast comparison for:
+
+- ST-GAT expected magnitude;
+- ST-GAT validation-thresholded event magnitude;
+- all-zero forecast;
+- last-bin persistence;
+- recent 24-hour mean;
+- train-only node climatology and simple hurdle climatology.
+
 `evaluate.py` does not invent uncertainty for a deterministic checkpoint.
 Prediction intervals must come from the separately trained and
 validation-calibrated ensemble pipeline.

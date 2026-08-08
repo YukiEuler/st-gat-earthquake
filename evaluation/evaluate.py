@@ -608,6 +608,10 @@ def main():
     
     model, model_type = load_model(model_path, model_kwargs, DEVICE)
     checkpoint_config = getattr(model, 'checkpoint_config', CONFIG)
+    activity_threshold = float(checkpoint_config.get(
+        'fitted_activity_threshold',
+        checkpoint_config.get('hurdle_activity_threshold', 0.5),
+    ))
     
     # ====================
     # GENERATE PREDICTIONS
@@ -623,9 +627,7 @@ def main():
         targets, activity_targets = split_hurdle_targets(packed_targets)
         hurdle_outputs = decode_hurdle_numpy(
             raw_predictions,
-            activity_threshold=checkpoint_config.get(
-                'hurdle_activity_threshold', 0.5
-            ),
+            activity_threshold=activity_threshold,
             activity_logit_bias=checkpoint_config.get(
                 'fitted_activity_logit_bias', 0.0
             ),
@@ -663,11 +665,13 @@ def main():
         overall_metrics['activity_detection'] = metrics_calc.calculate_activity_metrics(
             activity_targets,
             hurdle_outputs['activity_probability'],
-            threshold=checkpoint_config.get('hurdle_activity_threshold', 0.5),
+            threshold=activity_threshold,
         )
         conditional_raw = (
             hurdle_outputs['conditional'] * target_std + target_mean
         )
+        expected_raw = hurdle_outputs['expected'] * target_std + target_mean
+        event_raw = hurdle_outputs['thresholded'] * target_std + target_mean
         active_entries = np.broadcast_to(
             activity_targets >= 0.5, targets.shape
         )
@@ -675,6 +679,79 @@ def main():
             metrics_calc.calculate_regression_metrics(
                 targets[active_entries], conditional_raw[active_entries]
             )
+        )
+        overall_metrics['conditional_magnitude_active_diagnostics'] = (
+            metrics_calc.calculate_forecast_diagnostics(
+                targets[active_entries], conditional_raw[active_entries]
+            )
+        )
+        overall_metrics['forecast_views'] = {
+            'expected_magnitude': {
+                'interpretation': (
+                    'P(activity) times conditional Mw; primary squared-error forecast.'
+                ),
+                'regression': metrics_calc.calculate_regression_metrics(
+                    targets, expected_raw, activity_mask=activity_targets
+                ),
+                'diagnostics': metrics_calc.calculate_forecast_diagnostics(
+                    targets, expected_raw
+                ),
+            },
+            'event_magnitude': {
+                'interpretation': (
+                    'Conditional Mw for a validation-selected activity decision; '
+                    'zero otherwise.'
+                ),
+                'activity_threshold': activity_threshold,
+                'regression': metrics_calc.calculate_regression_metrics(
+                    targets, event_raw, activity_mask=activity_targets
+                ),
+                'diagnostics': metrics_calc.calculate_forecast_diagnostics(
+                    targets, event_raw
+                ),
+            },
+        }
+
+        from evaluation.baselines import (
+            evaluate_forecast_comparison,
+            generate_reference_forecasts,
+        )
+        reference_forecasts = generate_reference_forecasts(
+            data['test_target_data'],
+            data['train_target_data'],
+            data['target_stats'],
+            window_size=CONFIG['window_size'],
+            horizon=CONFIG['horizon'],
+            recent_window=CONFIG.get('baseline_recent_window', 6),
+            test_activity_series=data['test_target_activity'],
+            train_activity_series=data['train_target_activity'],
+        )
+        forecast_set = {
+            'stgat_expected': {
+                'kind': 'model_primary',
+                'description': 'Canonical ST-GAT expected-magnitude forecast.',
+                'prediction': expected_raw,
+                'activity_probability': hurdle_outputs['activity_probability'],
+                'activity_threshold': activity_threshold,
+            },
+            'stgat_event_thresholded': {
+                'kind': 'model_event_view',
+                'description': (
+                    'Canonical ST-GAT hard event forecast using validation threshold.'
+                ),
+                'prediction': event_raw,
+                'activity_probability': hurdle_outputs['activity_probability'],
+                'activity_threshold': activity_threshold,
+            },
+            **reference_forecasts,
+        }
+        overall_metrics['forecast_comparison'] = evaluate_forecast_comparison(
+            targets,
+            forecast_set,
+            activity_target=activity_targets,
+            feature_names=target_features,
+            magnitude_idx=CONFIG.get('magnitude_idx', 0),
+            primary_name='stgat_expected',
         )
     
     # Per-horizon metrics
@@ -758,10 +835,22 @@ def main():
         'conditional_magnitude_active': overall_metrics.get(
             'conditional_magnitude_active'
         ),
+        'conditional_magnitude_active_diagnostics': overall_metrics.get(
+            'conditional_magnitude_active_diagnostics'
+        ),
+        'forecast_views': overall_metrics.get('forecast_views'),
+        'forecast_comparison': overall_metrics.get('forecast_comparison'),
         'diagnostics': overall_metrics.get('diagnostics'),
         'uncertainty': uncertainty_metrics,
     }
     save_metrics_to_json(all_metrics, metrics_dir / 'complete_metrics.json')
+
+    if overall_metrics.get('forecast_comparison'):
+        from evaluation.baselines import save_forecast_comparison_csv
+        save_forecast_comparison_csv(
+            overall_metrics['forecast_comparison'],
+            metrics_dir / 'forecast_comparison.csv',
+        )
     
     # CSV for LaTeX
     df_horizon = save_metrics_to_csv(metrics_per_horizon, target_features, metrics_dir)
@@ -776,6 +865,8 @@ def main():
     print(f"   Metrics:")
     print(f"     - {metrics_dir / 'complete_metrics.json'}")
     print(f"     - {metrics_dir / 'per_horizon_metrics.csv'}")
+    if overall_metrics.get('forecast_comparison'):
+        print(f"     - {metrics_dir / 'forecast_comparison.csv'}")
     print("\n")
 
 

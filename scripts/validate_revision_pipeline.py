@@ -21,7 +21,12 @@ from data.adjacency import AdjacencyBuilder
 from models.baselines import NaiveBaseline
 from models.gat_layer import SparseGATLayer
 from training.losses import HurdleMagnitudeLoss
-from training.hurdle import decode_hurdle_tensor, fit_activity_logit_bias
+from training.hurdle import (
+    decode_hurdle_tensor,
+    fit_activity_logit_bias,
+    fit_activity_threshold,
+)
+from evaluation.baselines import generate_reference_forecasts
 
 
 def make_catalog(path):
@@ -100,6 +105,51 @@ def main():
         )
         calibrated_mean = 1.0 / (1.0 + np.exp(-bias))
         assert np.isclose(calibrated_mean, calibration_targets.mean(), atol=1e-6)
+        threshold, threshold_details = fit_activity_threshold(
+            np.array([0.1, 0.2, 0.8, 0.9], dtype=np.float32),
+            np.array([0, 0, 1, 1], dtype=np.float32),
+        )
+        assert np.isclose(threshold, 0.8)
+        assert np.isclose(threshold_details['f1_score'], 1.0)
+
+        # Tail weighting remains finite and applies only to explicitly active
+        # targets, including active events with negative magnitude.
+        tail_criterion = HurdleMagnitudeLoss(
+            magnitude_thresholds=[1.0, 2.0],
+            magnitude_weights=[1.5, 3.0],
+            max_magnitude_weight=3.0,
+            tail_underprediction_multiplier=1.25,
+        )
+        tail_pred = torch.zeros(1, 1, 3, 2, requires_grad=True)
+        tail_target = torch.tensor(
+            [[[[0.0, 0.0], [-0.2, 1.0], [3.0, 1.0]]]],
+            dtype=torch.float32,
+        )
+        tail_loss = tail_criterion(tail_pred, tail_target)
+        assert torch.isfinite(tail_loss)
+        tail_loss.backward()
+
+        # Reference forecasts must use only raw targets before each forecast
+        # origin, never rolling input features or future targets.
+        test_series = np.arange(8, dtype=np.float32).reshape(8, 1, 1)
+        train_series = np.array([0.0, 2.0, 0.0], dtype=np.float32).reshape(3, 1, 1)
+        test_activity = np.ones_like(test_series)
+        train_activity = (train_series != 0).astype(np.float32)
+        baselines = generate_reference_forecasts(
+            test_series, train_series,
+            {'std': np.array([1.0]), 'mean': np.array([0.0]),
+             'offset': np.array([0.0])},
+            window_size=3, horizon=2, recent_window=2,
+            test_activity_series=test_activity,
+            train_activity_series=train_activity,
+        )
+        assert baselines['persistence_last_bin']['prediction'].shape == (4, 2, 1, 1)
+        assert baselines['persistence_last_bin']['prediction'][0, 0, 0, 0] == 2.0
+        assert baselines['recent_mean_24h']['prediction'][0, 0, 0, 0] == 1.5
+        assert np.isclose(
+            baselines['train_node_climatology']['prediction'][0, 0, 0, 0],
+            2.0 / 3.0,
+        )
 
         # The baseline must select max_mw (input index 1), not the first input
         # channel (event count).

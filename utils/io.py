@@ -127,7 +127,10 @@ def generate_summary_report(output_dir, config, metrics, train_result=None):
     if 'uncertainty' in metrics:
         lines.append("\n  Uncertainty Metrics:")
         for metric, value in metrics['uncertainty'].items():
-            lines.append(f"    {metric}: {value:.6f}")
+            if isinstance(value, (int, float, np.number)):
+                lines.append(f"    {metric}: {value:.6f}")
+            else:
+                lines.append(f"    {metric}: {value}")
 
     if 'activity_detection' in metrics:
         lines.append("\n  Activity Detection:")
@@ -141,6 +144,38 @@ def generate_summary_report(output_dir, config, metrics, train_result=None):
         lines.append("\n  Conditional Magnitude (active bins only):")
         for metric, value in metrics['conditional_magnitude_active'].items():
             lines.append(f"    {metric}: {value:.6f}")
+
+    if 'conditional_magnitude_active_diagnostics' in metrics:
+        diagnostics = metrics['conditional_magnitude_active_diagnostics']
+        lines.append("\n  Conditional Magnitude Dispersion:")
+        for metric in [
+            'target_std', 'prediction_std',
+            'prediction_to_target_std_ratio',
+        ]:
+            lines.append(f"    {metric}: {diagnostics[metric]:.6f}")
+
+    if 'forecast_views' in metrics:
+        lines.append("\n  Explicit Forecast Views:")
+        for name, view in metrics['forecast_views'].items():
+            regression = view['regression']
+            threshold = view.get('activity_threshold')
+            suffix = f", threshold={threshold:.6f}" if threshold is not None else ''
+            lines.append(f"    {name}{suffix}:")
+            lines.append(
+                f"      MSE={regression['MSE']:.6f}, "
+                f"MAE={regression['MAE']:.6f}, R2={regression['R2']:.6f}"
+            )
+
+    if 'forecast_comparison' in metrics:
+        lines.append("\n  Forecast/Baseline Comparison:")
+        for name, result in metrics['forecast_comparison'].items():
+            regression = result['regression']
+            skill = result['primary_model_skill_vs_forecast']
+            lines.append(
+                f"    {name}: MSE={regression['MSE']:.6f}, "
+                f"MAE={regression['MAE']:.6f}, R2={regression['R2']:.6f}, "
+                f"primary_model_skill={skill:.6f}"
+            )
 
     if 'diagnostics' in metrics:
         lines.append("\n  Forecast Diagnostics:")
@@ -157,6 +192,7 @@ def generate_summary_report(output_dir, config, metrics, train_result=None):
         "         adjacency_matrix.npz",
         "      metrics/",
         "         evaluation_metrics.json",
+        "         forecast_comparison.csv",
         "      figures/",
         "          *.png",
         "\n" + "=" * 70,

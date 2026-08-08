@@ -368,7 +368,9 @@ class HurdleMagnitudeLoss(nn.Module):
                  expected_value_weight=1.0, smooth_l1_beta=0.5,
                  activity_pos_weight=None, magnitude_thresholds=None,
                  magnitude_weights=None, target_scale=1.0,
-                 target_offset=0.0):
+                 target_offset=0.0, normalize_magnitude_weights=True,
+                 max_magnitude_weight=None,
+                 tail_underprediction_multiplier=1.0):
         super().__init__()
         self.activity_weight = float(activity_weight)
         self.magnitude_weight = float(magnitude_weight)
@@ -385,6 +387,19 @@ class HurdleMagnitudeLoss(nn.Module):
             )
         self.target_scale = float(target_scale)
         self.target_offset = float(target_offset)
+        self.normalize_magnitude_weights = bool(normalize_magnitude_weights)
+        self.max_magnitude_weight = (
+            None if max_magnitude_weight is None else float(max_magnitude_weight)
+        )
+        self.tail_underprediction_multiplier = float(
+            tail_underprediction_multiplier
+        )
+        if self.max_magnitude_weight is not None and self.max_magnitude_weight < 1.0:
+            raise ValueError("max_magnitude_weight must be at least 1.0.")
+        if self.tail_underprediction_multiplier < 1.0:
+            raise ValueError(
+                "tail_underprediction_multiplier must be at least 1.0."
+            )
         self._last_components = {}
 
     def forward(self, pred, target):
@@ -443,6 +458,25 @@ class HurdleMagnitudeLoss(nn.Module):
                         ),
                         rare_weight,
                     )
+                if self.tail_underprediction_multiplier > 1.0:
+                    tail_mask = magnitude_raw >= min(self.magnitude_thresholds)
+                    underprediction = (
+                        conditional_magnitude[active_mask]
+                        < magnitude_target[active_mask]
+                    )
+                    rare_weight = torch.where(
+                        tail_mask & underprediction,
+                        rare_weight * self.tail_underprediction_multiplier,
+                        rare_weight,
+                    )
+                if self.max_magnitude_weight is not None:
+                    rare_weight = rare_weight.clamp(
+                        max=self.max_magnitude_weight
+                    )
+                # Keep the conditional-loss scale comparable with an
+                # unweighted run. This changes emphasis, not optimizer scale.
+                if self.normalize_magnitude_weights:
+                    rare_weight = rare_weight / rare_weight.mean().clamp_min(1e-8)
                 conditional_error = conditional_error * rare_weight
             magnitude_loss = conditional_error.mean()
         else:
