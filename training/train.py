@@ -216,10 +216,22 @@ def main(args):
             )
         elif loss_type == 'sparse_aware':
             from training.losses import SparseAwareLoss
+            magnitude_idx = CONFIG.get('magnitude_idx', 0)
+            target_scale = data['target_stats']['std'][magnitude_idx]
+            target_offset = data['target_stats'].get(
+                'offset', data['target_stats']['mean']
+            )[magnitude_idx]
             criterion = SparseAwareLoss(
                 active_loss_weight=CONFIG['active_weight'],
                 underpredict_penalty=CONFIG.get('underpredict_penalty', 2.0),
-                feature_weights=CONFIG.get('feature_weights')
+                feature_weights=CONFIG.get('feature_weights'),
+                max_active_weight=CONFIG.get('max_dynamic_active_weight', 60.0),
+                feature_names=data_info['target_features'],
+                magnitude_idx=magnitude_idx,
+                magnitude_thresholds=CONFIG.get('magnitude_event_thresholds', []),
+                magnitude_weights=CONFIG.get('magnitude_event_weights', []),
+                target_scale=target_scale,
+                target_offset=target_offset
             )
         elif loss_type == 'focal':
             from training.losses import FocalMSELoss
@@ -269,7 +281,8 @@ def main(args):
         target_std = target_stats['std']
         
         print(f"   Target features: {data_info['target_features']}")
-        print(f"   Mean: {target_mean}")
+        print(f"   Raw train mean: {target_stats['mean']}")
+        print(f"   Denormalization offset: {target_mean}")
         print(f"   Std: {target_std}")
         print(f"   Predictions shape: {predictions.shape}")
         print(f"   Targets shape: {targets.shape}")

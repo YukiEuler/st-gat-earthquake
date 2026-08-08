@@ -416,6 +416,24 @@ class DataPreprocessor:
         train_target, val_target, test_target = (
             target_norm[:train_end], target_norm[train_end:val_end], target_norm[val_end:]
         )
+        target_activity_rates = {
+            'train': float(np.mean(np.abs(target_raw[:train_end]) > 0)),
+            'val': float(np.mean(np.abs(target_raw[train_end:val_end]) > 0)),
+            'test': float(np.mean(np.abs(target_raw[val_end:]) > 0)),
+        }
+        magnitude_threshold_rates = {}
+        if 'max_mw' in self.target_features:
+            magnitude_idx = self.target_features.index('max_mw')
+            split_targets = {
+                'train': target_raw[:train_end, ..., magnitude_idx],
+                'val': target_raw[train_end:val_end, ..., magnitude_idx],
+                'test': target_raw[val_end:, ..., magnitude_idx],
+            }
+            for threshold in self.config.get('magnitude_event_thresholds', [1.0, 2.0, 3.0]):
+                magnitude_threshold_rates[str(threshold)] = {
+                    split: float(np.mean(values >= threshold))
+                    for split, values in split_targets.items()
+                }
         self.split_timestamps.update({
             'train_start': pd.Timestamp(time_index[0]).isoformat(),
             'train_end_bin': pd.Timestamp(time_index[train_end]).isoformat(),
@@ -426,6 +444,17 @@ class DataPreprocessor:
         print(" Normalization fitted on train period only.")
         print(f"   Input train mean: {self.feature_stats['mean']}")
         print(f"   Target train mean: {self.target_stats['mean']}")
+        print(
+            "   Target active rates: "
+            f"train={target_activity_rates['train']*100:.2f}%, "
+            f"val={target_activity_rates['val']*100:.2f}%, "
+            f"test={target_activity_rates['test']*100:.2f}%"
+        )
+        for threshold, rates in magnitude_threshold_rates.items():
+            print(
+                f"   Mw >= {threshold}: train={rates['train']*100:.3f}%, "
+                f"val={rates['val']*100:.3f}%, test={rates['test']*100:.3f}%"
+            )
         print(f"   Split sizes: train={len(train_data):,}, val={len(val_data):,}, test={len(test_data):,}")
 
         return {
@@ -450,6 +479,8 @@ class DataPreprocessor:
             'target_features': self.target_features,
             'feature_stats': self.feature_stats,
             'target_stats': self.target_stats,
+            'target_activity_rates': target_activity_rates,
+            'magnitude_threshold_rates': magnitude_threshold_rates,
             'node_info': self.node_info,
             'grid_params': self.grid_params,
             'df': df,

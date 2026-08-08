@@ -9,7 +9,7 @@ import torch
 # ==============================================================================
 CONFIG = {
     # Canonical rerun protocol (revision plan)
-    'canonical_run_name': 'revision_canonical_v1',
+    'canonical_run_name': 'revision_canonical_v2_sparse',
     'target_definition': 'raw_bin_max_mw',
     'target_zero_preserving': True,
     'split_mode': 'timestamp',
@@ -19,8 +19,8 @@ CONFIG = {
 
     # Data
     'filename': 'Amatrice_CAT5.v20210504.csv',
-    'grid_size': 0.015,           # ~1.11 km per cell
-    'time_bin': '4h',           # Agregasi per jam
+    'grid_size': 0.015,           # ~1.67 km latitude per cell
+    'time_bin': '4h',             # Four-hour aggregation bins
     
     # Spatial Bounds Filter (set to None to use full data extent)
     'lat_min': 42.5747,
@@ -36,9 +36,9 @@ CONFIG = {
     'use_active_nodes_only': True,
     'min_events_per_node': 1500,
     
-    # Sequence
-    'window_size': 24,          # Input: 24 jam ke belakang
-    'horizon': 6,              # Output: 24 jam ke depan (multi-step)
+    # Sequence (4-hour bins)
+    'window_size': 24,          # 24 bins = 96 hours of history
+    'horizon': 6,               # 6 bins = 24 hours ahead
     'train_ratio': 0.7,
     'val_ratio': 0.15,
     'mw_rolling_window': 3,
@@ -60,15 +60,16 @@ CONFIG = {
         }
     },
     
-    # Adjacency Matrix
-    'radius_km': 15.0,        # Radius konektivitas
-    'sigma_km': 150.0,           # Gaussian decay parameter
+    # Adjacency Matrix. The previous 15 km / sigma 150 km graph connected
+    # 64% of all node pairs and made distance weights almost uniform.
+    'radius_km': 5.0,
+    'sigma_km': 3.0,
     
     # Model
-    'hidden_dim': 32,
+    'hidden_dim': 64,
     'num_gat_layers': 2,
-    'num_heads': 2,
-    'dropout': 0.1,
+    'num_heads': 4,
+    'dropout': 0.2,
     'temporal_model': 'multiscale',   # Options: 'lstm', 'tft', or 'multiscale'
     'tft_layers': 3,            # Number of TFT encoder layers
     
@@ -77,14 +78,25 @@ CONFIG = {
     'multiscale_fusion': 'concat',   # Fusion type: 'concat', 'attention', or 'gate'
     
     # Training
-    'batch_size': 4,
-    'epochs': 50,
-    'learning_rate': 5e-4,
-    'early_stopping_patience': 7,
+    'batch_size': 8,
+    'epochs': 100,
+    'learning_rate': 3e-4,
+    'early_stopping_patience': 15,
     'weight_decay': 1e-4,
+    'scheduler_patience': 5,
+    'scheduler_factor': 0.5,
+    'min_learning_rate': 1e-6,
+    'gradient_clip_norm': 1.0,
     
     # Weighted Loss
-    'active_weight': 20.0,
+    # For sparse_aware loss this is the base multiplier. The effective
+    # multiplier is adapted to each batch and capped below.
+    'active_weight': 2.0,
+    'max_dynamic_active_weight': 60.0,
+    # Additional non-cumulative weights for increasingly rare magnitudes.
+    # These thresholds are interpreted in raw Mw units by SparseAwareLoss.
+    'magnitude_event_thresholds': [1.0, 2.0, 3.0],
+    'magnitude_event_weights': [2.0, 5.0, 10.0],
     'feature_weights': {
         'count': 1.0,
         'max_mw': 5.0,
@@ -100,15 +112,15 @@ CONFIG = {
     
     # Loss Function Options
     # Options: 'weighted_mse', 'asymmetric', 'active_only', 'sparse_aware', 'focal', 'multiscale'
-    'loss_type': 'multiscale',    # Multi-scale loss for 6h, 12h, 24h predictions
+    'loss_type': 'sparse_aware',
     'asymmetric_alpha': 0.8,      # Alpha for asymmetric loss (>0.5 = penalize underpredict more)
-    'underpredict_penalty': 5.0,  # Extra penalty for underprediction (sparse_aware only)
+    'underpredict_penalty': 2.0,
     'magnitude_idx': 0,           # Index of max_mw in target features (now 0 since only max_mw)
     'focal_gamma': 2.0,           # Focal loss gamma (higher = more focus on hard examples)
     
     # Multi-Scale Loss Options
-    'multiscale_horizons': [1, 2, 4],      # Horizons in timesteps: 1=6h, 2=12h, 4=24h
-    'multiscale_weights': [1.5, 1.75, 2.0], # Higher weight for longer horizons
+    'multiscale_horizons': [1, 3, 6],       # 4h, 12h, and 24h with 4-hour bins
+    'multiscale_weights': [1.0, 1.5, 2.0],
     
     # Feature Transformation
     # These are input-only transformations. The forecast target is never
@@ -131,7 +143,7 @@ CONFIG = {
     'n_cv_splits': 5,
     
     # Output
-    'output_dir': 'outputs',
+    'output_dir': 'outputs/revision_canonical_v2',
     'save_figures': True,
     'save_attention': True,
     

@@ -86,6 +86,8 @@ def write_run_manifest(output_dir, config, data=None, data_path=None,
             'val_end_idx': data.get('val_end_idx'),
             'feature_stats': data.get('feature_stats'),
             'target_stats': data.get('target_stats'),
+            'target_activity_rates': data.get('target_activity_rates'),
+            'magnitude_threshold_rates': data.get('magnitude_threshold_rates'),
             'grid_params': data.get('grid_params'),
             'node_info': data.get('node_info'),
         }

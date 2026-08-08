@@ -368,15 +368,28 @@ class SparseAwareLoss(nn.Module):
         feature_weights: Bobot per fitur
     """
     
-    def __init__(self, active_loss_weight=10.0, underpredict_penalty=2.0, feature_weights=None):
+    def __init__(self, active_loss_weight=10.0, underpredict_penalty=2.0,
+                 feature_weights=None, max_active_weight=100.0,
+                 feature_names=None, magnitude_idx=0,
+                 magnitude_thresholds=None, magnitude_weights=None,
+                 target_scale=1.0, target_offset=0.0):
         super().__init__()
         self.active_loss_weight = active_loss_weight
         self.underpredict_penalty = underpredict_penalty
+        self.max_active_weight = max_active_weight
+        self.feature_names = feature_names
+        self.magnitude_idx = magnitude_idx
+        self.magnitude_thresholds = magnitude_thresholds or []
+        self.magnitude_weights = magnitude_weights or []
+        if len(self.magnitude_thresholds) != len(self.magnitude_weights):
+            raise ValueError("magnitude_thresholds and magnitude_weights must have equal lengths")
+        self.target_scale = float(target_scale)
+        self.target_offset = float(target_offset)
         
         if feature_weights is None:
             self.feature_weights = torch.tensor([1.0, 5.0, 2.0, 1.0])
         elif isinstance(feature_weights, dict):
-            feature_order = ['count', 'max_mw', 'log_energy', 'avg_depth']
+            feature_order = feature_names or ['count', 'max_mw', 'log_energy', 'avg_depth']
             weights = [feature_weights.get(f, 1.0) for f in feature_order]
             self.feature_weights = torch.tensor(weights)
         else:
@@ -409,7 +422,10 @@ class SparseAwareLoss(nn.Module):
         n_active = active_mask.sum().item()
         n_inactive = (~active_mask).sum().item()
         imbalance_ratio = max(n_inactive / max(n_active, 1), 1.0)
-        dynamic_active_weight = min(self.active_loss_weight * imbalance_ratio, 100.0)
+        dynamic_active_weight = min(
+            self.active_loss_weight * imbalance_ratio,
+            self.max_active_weight
+        )
         
         # Base MSE
         residual = pred - target
@@ -422,9 +438,30 @@ class SparseAwareLoss(nn.Module):
         
         # Weight active samples
         active_weight = torch.where(active_mask.unsqueeze(-1), dynamic_active_weight, 1.0)
+
+        # Rare-event weighting uses raw Mw thresholds even though the model is
+        # trained in normalized target space. Weights are assigned by the
+        # highest threshold reached (not multiplied cumulatively).
+        magnitude_weight = torch.ones_like(target)
+        if self.magnitude_idx < target.shape[-1] and self.magnitude_thresholds:
+            magnitude_raw = (
+                target[..., self.magnitude_idx] * self.target_scale +
+                self.target_offset
+            )
+            magnitude_weight_scalar = torch.ones_like(magnitude_raw)
+            for threshold, weight in zip(self.magnitude_thresholds, self.magnitude_weights):
+                magnitude_weight_scalar = torch.where(
+                    magnitude_raw >= threshold,
+                    torch.as_tensor(weight, device=device, dtype=target.dtype),
+                    magnitude_weight_scalar
+                )
+            magnitude_weight[..., self.magnitude_idx] = magnitude_weight_scalar
         
         # Combine weights
-        weighted_mse = mse * feature_weights_expanded * active_weight * asymmetric_weight
+        weighted_mse = (
+            mse * feature_weights_expanded * active_weight *
+            asymmetric_weight * magnitude_weight
+        )
         
         return weighted_mse.mean()
 

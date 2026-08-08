@@ -442,10 +442,23 @@ class AblationStudy:
             )
         elif loss_type == 'sparse_aware':
             from training.losses import SparseAwareLoss
+            magnitude_idx = self.config.get('magnitude_idx', 0)
+            target_stats = data_info.get('target_stats', {})
+            target_std = target_stats.get('std', [1.0])
+            target_offset_values = target_stats.get(
+                'offset', target_stats.get('mean', [0.0])
+            )
             criterion = SparseAwareLoss(
                 active_loss_weight=self.config['active_weight'],
                 underpredict_penalty=self.config.get('underpredict_penalty', 2.0),
-                feature_weights=self.config.get('feature_weights')
+                feature_weights=self.config.get('feature_weights'),
+                max_active_weight=self.config.get('max_dynamic_active_weight', 60.0),
+                feature_names=data_info.get('target_features'),
+                magnitude_idx=magnitude_idx,
+                magnitude_thresholds=self.config.get('magnitude_event_thresholds', []),
+                magnitude_weights=self.config.get('magnitude_event_weights', []),
+                target_scale=target_std[magnitude_idx],
+                target_offset=target_offset_values[magnitude_idx]
             )
         elif loss_type == 'focal':
             from training.losses import FocalMSELoss

@@ -25,7 +25,11 @@ class Trainer:
         )
         
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=3
+            self.optimizer,
+            mode='min',
+            factor=config.get('scheduler_factor', 0.5),
+            patience=config.get('scheduler_patience', 5),
+            min_lr=config.get('min_learning_rate', 1e-6),
         )
         
         # Tracking
@@ -57,7 +61,10 @@ class Trainer:
                 continue
             
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(),
+                max_norm=self.config.get('gradient_clip_norm', 1.0)
+            )
             self.optimizer.step()
             
             total_loss += loss.item()
