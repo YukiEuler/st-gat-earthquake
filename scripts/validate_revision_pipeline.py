@@ -20,6 +20,8 @@ from data.dataset import SeismicDataset
 from data.adjacency import AdjacencyBuilder
 from models.baselines import NaiveBaseline
 from models.gat_layer import SparseGATLayer
+from training.losses import HurdleMagnitudeLoss
+from training.hurdle import decode_hurdle_tensor, fit_activity_logit_bias
 
 
 def make_catalog(path):
@@ -31,7 +33,8 @@ def make_catalog(path):
         rows.append({
             'year': current.year, 'month': current.month, 'day': current.day,
             'hour': current.hour, 'minute': 0, 'second': 0,
-            'lat': 42.60, 'lon': 13.15, 'mw': 1.0 + 0.1 * step, 'dep': 5.0,
+            'lat': 42.60, 'lon': 13.15,
+            'mw': -0.2 if step == 0 else 1.0 + 0.1 * step, 'dep': 5.0,
             'EH1': 0.1, 'EH2': 0.1, 'ml_mean': 1.0, 'ml_n': 1,
         })
         if step >= 9:
@@ -65,6 +68,9 @@ def main():
         data = DataPreprocessor(config).process(str(catalog))
 
         assert data['target_raw'].shape[-1] == 1
+        assert data['target_activity_raw'].shape[-1] == 1
+        assert data['target_activity_raw'][0, 0, 0] == 1.0
+        assert data['target_raw'][0, 0, 0] < 0.0
         assert data['target_stats']['zero_preserving'] is True
         assert data['target_stats']['offset'][0] == 0
         assert data['node_info']['active_nodes_fit_on_train'] is True
@@ -72,11 +78,28 @@ def main():
 
         dataset = SeismicDataset(
             data['test_data'], target_data=data['test_target_data'],
+            activity_data=data['test_target_activity'],
             window_size=1, horizon=1
         )
         x, y = dataset[0]
         assert x.shape[-1] == len(data['feature_names'])
-        assert y.shape[-1] == 1
+        assert y.shape[-1] == 2
+
+        # Hurdle loss must use the explicit activity channel and decode to a
+        # one-channel point prediction without treating negative Mw as empty.
+        raw_output = torch.zeros(*y.unsqueeze(0).shape[:-1], 2, requires_grad=True)
+        criterion = HurdleMagnitudeLoss()
+        loss = criterion(raw_output, y.unsqueeze(0))
+        assert torch.isfinite(loss)
+        loss.backward()
+        decoded = decode_hurdle_tensor(raw_output)
+        assert decoded['expected'].shape[-1] == 1
+        calibration_targets = np.array([0, 0, 0, 1], dtype=np.float32)
+        bias = fit_activity_logit_bias(
+            np.zeros_like(calibration_targets), calibration_targets
+        )
+        calibrated_mean = 1.0 / (1.0 + np.exp(-bias))
+        assert np.isclose(calibrated_mean, calibration_targets.mean(), atol=1e-6)
 
         # The baseline must select max_mw (input index 1), not the first input
         # channel (event count).

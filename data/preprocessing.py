@@ -232,6 +232,10 @@ class DataPreprocessor:
         feature_names = list(self.features)
         X = np.zeros((n_timesteps, num_nodes, len(feature_names)), dtype=np.float32)
         target_raw = np.zeros((n_timesteps, num_nodes, len(self.target_features)), dtype=np.float32)
+        # Keep event occurrence separate from magnitude.  An empty bin and an
+        # observed event with Mw == 0 cannot be distinguished from magnitude
+        # alone (and this catalog also contains negative magnitudes).
+        target_activity_raw = np.zeros((n_timesteps, num_nodes, 1), dtype=np.float32)
         mapping = {
             'count': 'count', 'max_mw': 'max_mw', 'log_energy': 'log_energy',
             'avg_depth': 'avg_depth', 'min_depth': 'min_depth', 'std_mw': 'std_mw',
@@ -242,6 +246,9 @@ class DataPreprocessor:
         if len(grouped):
             t_idx = grouped['time_idx'].to_numpy(dtype=int)
             n_idx = grouped['node_id'].to_numpy(dtype=int)
+            target_activity_raw[t_idx, n_idx, 0] = (
+                grouped['count'].to_numpy(dtype=np.float32) > 0
+            ).astype(np.float32)
             for i, feat in enumerate(self.features):
                 if feat in mapping:
                     values = grouped[mapping[feat]].to_numpy(dtype=np.float32)
@@ -335,8 +342,11 @@ class DataPreprocessor:
 
         print(f"   Timesteps: {n_timesteps:,}")
         print(f"   Features: {feature_names}")
-        print(f"   Input shape: {X.shape}; raw target shape: {target_raw.shape}")
-        return X, target_raw, n_timesteps, feature_names, time_index
+        print(
+            f"   Input shape: {X.shape}; raw target shape: {target_raw.shape}; "
+            f"activity target shape: {target_activity_raw.shape}"
+        )
+        return X, target_raw, target_activity_raw, n_timesteps, feature_names, time_index
 
     @staticmethod
     def _fit_stats(values, preserve_zero=False):
@@ -399,7 +409,14 @@ class DataPreprocessor:
         """Run the complete preprocessing pipeline."""
         df = self.load_data(filepath)
         df, num_nodes = self.create_spatial_grid(df)
-        X_raw, target_raw, n_timesteps, feature_names, time_index = self.create_temporal_features(df, num_nodes)
+        (
+            X_raw,
+            target_raw,
+            target_activity_raw,
+            n_timesteps,
+            feature_names,
+            time_index,
+        ) = self.create_temporal_features(df, num_nodes)
 
         train_end, val_end = self._split_indices(time_index)
         X_train_raw = X_raw[:train_end]
@@ -416,10 +433,15 @@ class DataPreprocessor:
         train_target, val_target, test_target = (
             target_norm[:train_end], target_norm[train_end:val_end], target_norm[val_end:]
         )
+        train_target_activity, val_target_activity, test_target_activity = (
+            target_activity_raw[:train_end],
+            target_activity_raw[train_end:val_end],
+            target_activity_raw[val_end:],
+        )
         target_activity_rates = {
-            'train': float(np.mean(np.abs(target_raw[:train_end]) > 0)),
-            'val': float(np.mean(np.abs(target_raw[train_end:val_end]) > 0)),
-            'test': float(np.mean(np.abs(target_raw[val_end:]) > 0)),
+            'train': float(np.mean(train_target_activity)),
+            'val': float(np.mean(val_target_activity)),
+            'test': float(np.mean(test_target_activity)),
         }
         magnitude_threshold_rates = {}
         if 'max_mw' in self.target_features:
@@ -464,8 +486,12 @@ class DataPreprocessor:
             'train_target_data': train_target,
             'val_target_data': val_target,
             'test_target_data': test_target,
+            'train_target_activity': train_target_activity,
+            'val_target_activity': val_target_activity,
+            'test_target_activity': test_target_activity,
             'X_raw': X_raw,
             'target_raw': target_raw,
+            'target_activity_raw': target_activity_raw,
             'train_target_raw': target_train_raw,
             'val_target_raw': target_raw[train_end:val_end],
             'test_target_raw': target_raw[val_end:],

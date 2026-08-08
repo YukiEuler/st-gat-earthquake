@@ -12,7 +12,7 @@ Contains all hyperparameters and settings:
 **Data Configuration**
 ```python
 'filename': 'Amatrice_CAT5.v20210504.csv'
-'grid_size': 0.015                    # ~1.11 km per cell
+'grid_size': 0.015                    # ~1.67 km latitude per cell
 'time_bin': '4h'                      # Temporal aggregation
 'lat_min/max': [42.5747, 42.9047]    # Spatial bounds
 'lon_min/max': [13.1282, 13.3182]
@@ -20,17 +20,18 @@ Contains all hyperparameters and settings:
 
 **Model Configuration**
 ```python
-'window_size': 24          # Input sequence length (hours)
-'horizon': 6               # Output prediction length
-'num_layers': 3            # Number of STGAT layers
-'hidden_dims': [64, 32]    # Hidden dimensions
+'window_size': 24          # 24 bins = 96 hours of history
+'horizon': 6               # 6 bins = 24 hours ahead
+'hidden_dim': 64
+'num_gat_layers': 2
+'num_heads': 4
 ```
 
 **Training Configuration**
 ```python
-'learning_rate': 0.001
-'batch_size': 32
-'num_epochs': 100
+'learning_rate': 0.0003
+'batch_size': 8
+'epochs': 100
 'dropout': 0.2
 ```
 
@@ -127,9 +128,11 @@ from my_config import MY_CONFIG
 - `device` - GPU/CPU selection
 
 ### Loss & Metrics
-- Loss function weights
-- Class weights for imbalanced data
-- Evaluation metrics to track
+
+The canonical v3 run uses `loss_type='hurdle'`. The model learns an activity
+logit and a conditional raw-Mw estimate; the primary point prediction is
+`P(activity) * E[Mw | activity]`. Activity-logit bias is fitted on validation
+only. Dynamic active/rare-event weighting is not used for the primary run.
 
 ## Environment Variables
 

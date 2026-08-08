@@ -4,7 +4,10 @@
 
 import numpy as np
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from sklearn.metrics import precision_score, recall_score, f1_score
+from sklearn.metrics import (
+    precision_score, recall_score, f1_score, roc_auc_score,
+    average_precision_score,
+)
 import json
 from pathlib import Path
 
@@ -15,7 +18,7 @@ class MetricsCalculator:
     def __init__(self, feature_names=None):
         self.feature_names = feature_names or ['count', 'max_mw', 'log_energy', 'avg_depth']
     
-    def calculate_regression_metrics(self, y_true, y_pred):
+    def calculate_regression_metrics(self, y_true, y_pred, activity_mask=None):
         """
         Calculate standard regression metrics.
         
@@ -32,6 +35,11 @@ class MetricsCalculator:
         mse = mean_squared_error(y_true_flat, y_pred_flat)
         rmse = np.sqrt(mse)
         mae = mean_absolute_error(y_true_flat, y_pred_flat)
+        bias = float(np.mean(y_pred_flat - y_true_flat))
+        if np.std(y_true_flat) > 0 and np.std(y_pred_flat) > 0:
+            pearson_r = float(np.corrcoef(y_true_flat, y_pred_flat)[0, 1])
+        else:
+            pearson_r = float('nan')
         
         # R² (handle zero variance)
         if np.std(y_true_flat) > 0:
@@ -40,14 +48,23 @@ class MetricsCalculator:
             r2 = float('nan')
         
         # R² for ACTIVE (non-zero) values only - more meaningful for sparse seismic data
-        active_mask = y_true_flat != 0
-        if active_mask.sum() > 10 and np.std(y_true_flat[active_mask]) > 0:
-            r2_active = r2_score(y_true_flat[active_mask], y_pred_flat[active_mask])
+        if activity_mask is None:
+            active_flat = y_true_flat != 0
+        else:
+            activity = np.asarray(activity_mask)
+            while activity.ndim > np.asarray(y_true).ndim and activity.shape[-1] == 1:
+                activity = np.squeeze(activity, axis=-1)
+            if activity.shape != np.asarray(y_true).shape:
+                activity = np.broadcast_to(activity, np.asarray(y_true).shape)
+            active_flat = activity.flatten() >= 0.5
+        if active_flat.sum() > 10 and np.std(y_true_flat[active_flat]) > 0:
+            r2_active = r2_score(y_true_flat[active_flat], y_pred_flat[active_flat])
         else:
             r2_active = float('nan')
         
         # MAPE (avoid division by zero)
-        mask = y_true_flat != 0
+        # MAPE is unstable around zero; use active bins with |Mw| >= 0.1.
+        mask = active_flat & (np.abs(y_true_flat) >= 0.1)
         if mask.sum() > 0:
             mape = np.mean(np.abs((y_true_flat[mask] - y_pred_flat[mask]) / y_true_flat[mask])) * 100
         else:
@@ -58,11 +75,14 @@ class MetricsCalculator:
             'RMSE': float(rmse),
             'MAE': float(mae),
             'R2': float(r2),
-            'R2_active': float(r2_active),  # R² on non-zero values only
+            'R2_active': float(r2_active),  # R² on explicit active bins
+            'Pearson_r': pearson_r,
+            'Bias': bias,
             'MAPE': float(mape),
+            'MAPE_active_abs_ge_0_1': float(mape),
         }
     
-    def calculate_per_feature_metrics(self, y_true, y_pred):
+    def calculate_per_feature_metrics(self, y_true, y_pred, activity_mask=None):
         """Calculate metrics for each feature separately."""
         results = {}
         
@@ -71,20 +91,24 @@ class MetricsCalculator:
         for i in range(n_features):
             feat_name = self.feature_names[i] if i < len(self.feature_names) else f'feature_{i}'
             results[feat_name] = self.calculate_regression_metrics(
-                y_true[..., i], y_pred[..., i]
+                y_true[..., i], y_pred[..., i], activity_mask=activity_mask
             )
         
         return results
     
-    def calculate_per_horizon_metrics(self, y_true, y_pred):
+    def calculate_per_horizon_metrics(self, y_true, y_pred, activity_mask=None):
         """Calculate metrics for each prediction horizon separately."""
         results = {}
         
         horizon = y_true.shape[1]
         
         for h in range(horizon):
+            horizon_activity = (
+                None if activity_mask is None else np.asarray(activity_mask)[:, h]
+            )
             results[f'h{h+1}'] = self.calculate_regression_metrics(
-                y_true[:, h, :, :], y_pred[:, h, :, :]
+                y_true[:, h, :, :], y_pred[:, h, :, :],
+                activity_mask=horizon_activity,
             )
         
         return results
@@ -306,12 +330,85 @@ class MetricsCalculator:
             'positive_rate': float(positive_rate),
         }
     
-    def calculate_all_metrics(self, y_true, y_pred, y_pred_std=None, magnitude_idx=0):
+    def calculate_activity_metrics(self, y_true, probability, threshold=0.5):
+        """Evaluate the auxiliary event-occurrence probability."""
+        y_true = (np.asarray(y_true).flatten() >= 0.5).astype(np.int64)
+        probability = np.clip(
+            np.asarray(probability).flatten().astype(float), 1e-7, 1.0 - 1e-7
+        )
+        prediction = (probability >= float(threshold)).astype(np.int64)
+        tp = int(np.sum((prediction == 1) & (y_true == 1)))
+        tn = int(np.sum((prediction == 0) & (y_true == 0)))
+        fp = int(np.sum((prediction == 1) & (y_true == 0)))
+        fn = int(np.sum((prediction == 0) & (y_true == 1)))
+        specificity = tn / (tn + fp) if (tn + fp) else float('nan')
+        has_both_classes = np.unique(y_true).size == 2
+        return {
+            'threshold': float(threshold),
+            'prevalence': float(np.mean(y_true)),
+            'mean_probability': float(np.mean(probability)),
+            'brier_score': float(np.mean((probability - y_true) ** 2)),
+            'log_loss': float(np.mean(
+                -(y_true * np.log(probability)
+                  + (1 - y_true) * np.log(1 - probability))
+            )),
+            'roc_auc': (
+                float(roc_auc_score(y_true, probability))
+                if has_both_classes else float('nan')
+            ),
+            'pr_auc': (
+                float(average_precision_score(y_true, probability))
+                if has_both_classes else float('nan')
+            ),
+            'precision': float(precision_score(y_true, prediction, zero_division=0)),
+            'recall': float(recall_score(y_true, prediction, zero_division=0)),
+            'f1_score': float(f1_score(y_true, prediction, zero_division=0)),
+            'specificity': float(specificity),
+            'true_positives': tp,
+            'true_negatives': tn,
+            'false_positives': fp,
+            'false_negatives': fn,
+        }
+
+    def calculate_forecast_diagnostics(self, y_true, y_pred):
+        """Flag mean-collapse and compare with the natural zero forecast."""
+        y_true = np.asarray(y_true).flatten().astype(float)
+        y_pred = np.asarray(y_pred).flatten().astype(float)
+        mse = float(np.mean((y_true - y_pred) ** 2))
+        zero_mse = float(np.mean(y_true ** 2))
+        target_std = float(np.std(y_true))
+        prediction_std = float(np.std(y_pred))
+        std_ratio = prediction_std / target_std if target_std > 0 else float('nan')
+        return {
+            'target_mean': float(np.mean(y_true)),
+            'prediction_mean': float(np.mean(y_pred)),
+            'target_std': target_std,
+            'prediction_std': prediction_std,
+            'prediction_to_target_std_ratio': float(std_ratio),
+            'zero_forecast_mse': zero_mse,
+            'model_mse': mse,
+            'skill_vs_zero_forecast': (
+                float(1.0 - mse / zero_mse) if zero_mse > 0 else float('nan')
+            ),
+            'constant_prediction_warning': bool(
+                np.isfinite(std_ratio) and std_ratio < 0.1
+            ),
+            'worse_than_zero_forecast_warning': bool(mse > zero_mse),
+        }
+
+    def calculate_all_metrics(self, y_true, y_pred, y_pred_std=None,
+                              magnitude_idx=0, activity_mask=None):
         """Calculate all metrics."""
         results = {
-            'overall': self.calculate_regression_metrics(y_true, y_pred),
-            'per_feature': self.calculate_per_feature_metrics(y_true, y_pred),
-            'per_horizon': self.calculate_per_horizon_metrics(y_true, y_pred),
+            'overall': self.calculate_regression_metrics(
+                y_true, y_pred, activity_mask=activity_mask
+            ),
+            'per_feature': self.calculate_per_feature_metrics(
+                y_true, y_pred, activity_mask=activity_mask
+            ),
+            'per_horizon': self.calculate_per_horizon_metrics(
+                y_true, y_pred, activity_mask=activity_mask
+            ),
             'peak_detection': self.calculate_peak_detection_metrics(y_true, y_pred),
         }
         
@@ -365,6 +462,34 @@ class MetricsCalculator:
             print(f"   {feat}:")
             for metric, value in metrics.items():
                 print(f"      {metric}: {value:.6f}")
+
+        if 'activity_detection' in results:
+            activity = results['activity_detection']
+            print("\n Activity Detection:")
+            for metric in [
+                'prevalence', 'mean_probability', 'brier_score', 'roc_auc',
+                'pr_auc', 'precision', 'recall', 'f1_score', 'specificity'
+            ]:
+                print(f"   {metric}: {activity[metric]:.6f}")
+
+        if 'conditional_magnitude_active' in results:
+            print("\n Conditional Magnitude (active bins only):")
+            for metric, value in results['conditional_magnitude_active'].items():
+                print(f"   {metric}: {value:.6f}")
+
+        if 'diagnostics' in results:
+            diagnostics = results['diagnostics']
+            print("\n Forecast Diagnostics:")
+            for metric in [
+                'target_mean', 'prediction_mean', 'target_std',
+                'prediction_std', 'prediction_to_target_std_ratio',
+                'zero_forecast_mse', 'model_mse', 'skill_vs_zero_forecast'
+            ]:
+                print(f"   {metric}: {diagnostics[metric]:.6f}")
+            if diagnostics['constant_prediction_warning']:
+                print("   WARNING: prediction variance is close to constant.")
+            if diagnostics['worse_than_zero_forecast_warning']:
+                print("   WARNING: model MSE is worse than an all-zero forecast.")
         
         if 'uncertainty' in results:
             print("\n Uncertainty Metrics:")

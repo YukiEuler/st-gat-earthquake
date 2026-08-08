@@ -117,7 +117,7 @@ def generate_summary_report(output_dir, config, metrics, train_result=None):
     
     if train_result:
         lines.append(f"  Epochs Trained: {train_result.get('epochs_trained', 'N/A')}")
-        lines.append(f"  Best Test Loss: {train_result.get('best_loss', 'N/A'):.6f}")
+        lines.append(f"  Best Validation Loss: {train_result.get('best_loss', 'N/A'):.6f}")
     
     if 'overall' in metrics:
         lines.append("\n  Overall Metrics:")
@@ -128,6 +128,24 @@ def generate_summary_report(output_dir, config, metrics, train_result=None):
         lines.append("\n  Uncertainty Metrics:")
         for metric, value in metrics['uncertainty'].items():
             lines.append(f"    {metric}: {value:.6f}")
+
+    if 'activity_detection' in metrics:
+        lines.append("\n  Activity Detection:")
+        for metric in [
+            'prevalence', 'mean_probability', 'brier_score', 'roc_auc',
+            'pr_auc', 'precision', 'recall', 'f1_score', 'specificity'
+        ]:
+            lines.append(f"    {metric}: {metrics['activity_detection'][metric]:.6f}")
+
+    if 'conditional_magnitude_active' in metrics:
+        lines.append("\n  Conditional Magnitude (active bins only):")
+        for metric, value in metrics['conditional_magnitude_active'].items():
+            lines.append(f"    {metric}: {value:.6f}")
+
+    if 'diagnostics' in metrics:
+        lines.append("\n  Forecast Diagnostics:")
+        for metric, value in metrics['diagnostics'].items():
+            lines.append(f"    {metric}: {value}")
     
     lines.extend([
         "\n" + "-" * 70,

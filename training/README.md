@@ -31,6 +31,7 @@ Configuration: `config/config_event.py`
 
 - **`trainer.py`** - Base Trainer class with training loop
 - **`losses.py`** - Custom loss functions
+- **`hurdle.py`** - Activity/magnitude decoding and validation-only logit-bias calibration
 - **`uncertainty.py`** - Uncertainty quantification methods
 - **`cross_validation.py`** - K-fold and cross-validation utilities
 
@@ -50,4 +51,6 @@ from training.train_multiresolution import main
 
 ## Output
 
-Models are saved to `outputs/` directory with checkpoints and predictions.
+The canonical run is saved to `outputs/revision_canonical_v3/`. Its CSV keeps
+the primary expected Mw forecast plus activity probability, conditional Mw,
+and thresholded Mw for diagnostics.

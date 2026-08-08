@@ -57,7 +57,8 @@ class PredictionVisualizer:
             
             # Subsample for plotting
             n_samples = min(10000, len(pred_flat))
-            idx = np.random.choice(len(pred_flat), n_samples, replace=False)
+            rng = np.random.default_rng(42)
+            idx = rng.choice(len(pred_flat), n_samples, replace=False)
             
             ax.scatter(target_flat[idx], pred_flat[idx], alpha=0.3, s=10)
             
@@ -66,14 +67,20 @@ class PredictionVisualizer:
             max_val = max(target_flat.max(), pred_flat.max())
             ax.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2)
             
-            # Calculate R
+            # R² and Pearson r are different statistics. R² may be below -1,
+            # while a correlation coefficient is always within [-1, 1].
             from sklearn.metrics import r2_score
             r2 = r2_score(target_flat, pred_flat) if np.std(target_flat) > 0 else 0
+            pearson_r = (
+                np.corrcoef(target_flat, pred_flat)[0, 1]
+                if np.std(target_flat) > 0 and np.std(pred_flat) > 0
+                else np.nan
+            )
             
             feat_name = self.feature_names[i] if i < len(self.feature_names) else f'Feature {i}'
             ax.set_xlabel('Actual')
             ax.set_ylabel('Predicted')
-            ax.set_title(f'{feat_name}\nR = {r2:.4f}')
+            ax.set_title(f'{feat_name}\nR² = {r2:.4f} | r = {pearson_r:.4f}')
             ax.grid(True, alpha=0.3)
         
         # Hide unused axes
@@ -133,6 +140,7 @@ class PredictionVisualizer:
         return fig
     
     def plot_most_active_node(self, y_true, y_pred, horizon_idx=0,
+                               activity_mask=None, time_bin_hours=4,
                                save_name='most_active_node_prediction'):
         """
         Find and plot predictions for the most active node (highest event count).
@@ -143,17 +151,28 @@ class PredictionVisualizer:
             horizon_idx: Which horizon to plot
             save_name: Output filename
         """
-        # Find most active node based on total event count (first feature, typically 'count')
-        # Sum across all samples and horizons for each node
-        if y_true.ndim == 4:  # (B, H, N, F)
-            node_activity = y_true[:, :, :, 0].sum(axis=(0, 1))  # Sum count over time
-        else:  # (B, N, F)
-            node_activity = y_true[:, :, 0].sum(axis=0)
+        # The primary target is max_mw, not event count. Select the node from
+        # the explicit activity target instead of summing magnitudes.
+        if activity_mask is not None:
+            activity = np.asarray(activity_mask)
+            if activity.shape[-1] == 1:
+                activity = activity[..., 0]
+            node_activity = (
+                activity.sum(axis=(0, 1))
+                if y_true.ndim == 4 else activity.sum(axis=0)
+            )
+        elif y_true.ndim == 4:  # fallback for legacy artifacts
+            node_activity = (np.abs(y_true[:, :, :, 0]) > 0).sum(axis=(0, 1))
+        else:
+            node_activity = (np.abs(y_true[:, :, 0]) > 0).sum(axis=0)
         
         most_active_idx = np.argmax(node_activity)
-        total_events = node_activity[most_active_idx]
+        active_bins = node_activity[most_active_idx]
         
-        print(f"   Most active node: {most_active_idx} (Total events: {total_events:.0f})")
+        print(
+            f"   Most active node: {most_active_idx} "
+            f"(Active target occurrences: {active_bins:.0f})"
+        )
         
         n_features = y_true.shape[-1]
         
@@ -170,14 +189,14 @@ class PredictionVisualizer:
                 actual = y_true[:, most_active_idx, i]
                 predicted = y_pred[:, most_active_idx, i]
             
-            time_steps = np.arange(len(actual))
+            time_steps = np.arange(len(actual)) * time_bin_hours
             
             # Plot actual vs predicted
             ax.plot(time_steps, actual, 'b-', label='Actual', alpha=0.8, linewidth=1.5)
             ax.plot(time_steps, predicted, 'r--', label='Predicted', alpha=0.8, linewidth=1.5)
             
             # Calculate correlation for this feature
-            if np.std(actual) > 0:
+            if np.std(actual) > 0 and np.std(predicted) > 0:
                 from scipy.stats import pearsonr
                 corr, _ = pearsonr(actual, predicted)
                 corr_text = f'(r={corr:.3f})'
@@ -185,21 +204,23 @@ class PredictionVisualizer:
                 corr_text = ''
             
             feat_name = self.feature_names[i] if i < len(self.feature_names) else f'Feature {i}'
-            ax.set_xlabel('Time Step (hours)')
+            ax.set_xlabel('Elapsed forecast-origin time (hours)')
             ax.set_ylabel(feat_name)
             ax.set_title(f'{feat_name} {corr_text}')
-            ax.legend(loc='upper right')
             ax.grid(True, alpha=0.3)
             
             # Highlight peaks in actual data
-            if i == 0:  # Only for count feature
+            if i == 0:
                 threshold = np.percentile(actual, 90)
                 peak_mask = actual > threshold
                 if peak_mask.sum() > 0:
                     ax.scatter(time_steps[peak_mask], actual[peak_mask], 
                               color='green', s=50, zorder=5, label='Peak Events')
+            ax.legend(loc='upper right')
         
-        plt.suptitle(f'Predictions at Most Active Node (Node {most_active_idx}, Horizon h+{horizon_idx+1})',
+        lead_hours = (horizon_idx + 1) * time_bin_hours
+        plt.suptitle(
+                    f'Predictions at Most Active Node (Node {most_active_idx}, Lead {lead_hours} h)',
                     fontsize=14, fontweight='bold')
         plt.tight_layout()
         
@@ -208,8 +229,94 @@ class PredictionVisualizer:
         print(f" Saved: {save_path}")
         
         return fig, most_active_idx
+
+    def plot_hurdle_activity(self, activity_target, activity_probability,
+                              magnitude_target, conditional_magnitude,
+                              threshold=0.5,
+                              save_name='hurdle_activity_diagnostics'):
+        """Visualize the activity head separately from conditional Mw."""
+        activity = np.asarray(activity_target).squeeze(-1)
+        probability = np.asarray(activity_probability).squeeze(-1)
+        magnitude = np.asarray(magnitude_target).squeeze(-1)
+        conditional = np.asarray(conditional_magnitude).squeeze(-1)
+
+        activity_flat = activity.flatten() >= 0.5
+        probability_flat = probability.flatten()
+        fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+
+        # Reliability diagram.
+        bins = np.linspace(0.0, 1.0, 11)
+        centers = []
+        observed = []
+        for left, right in zip(bins[:-1], bins[1:]):
+            include = (probability_flat >= left) & (
+                probability_flat < right if right < 1.0 else probability_flat <= right
+            )
+            if include.any():
+                centers.append(float(probability_flat[include].mean()))
+                observed.append(float(activity_flat[include].mean()))
+        axes[0, 0].plot([0, 1], [0, 1], 'k--', label='Perfect calibration')
+        axes[0, 0].plot(centers, observed, 'o-', label='Model')
+        axes[0, 0].set(xlabel='Mean predicted probability',
+                       ylabel='Observed activity rate',
+                       title='Activity reliability')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+
+        # Probability separation for active and empty bins.
+        axes[0, 1].hist(probability_flat[~activity_flat], bins=30, alpha=0.6,
+                        density=True, label='Empty bin')
+        axes[0, 1].hist(probability_flat[activity_flat], bins=30, alpha=0.6,
+                        density=True, label='Active bin')
+        axes[0, 1].axvline(threshold, color='red', linestyle='--',
+                           label=f'Threshold {threshold:.2f}')
+        axes[0, 1].set(xlabel='Predicted activity probability', ylabel='Density',
+                       title='Activity probability separation')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True, alpha=0.3)
+
+        # Activity probability over time for the most frequently active node.
+        node_activity = activity.sum(axis=(0, 1))
+        node_idx = int(np.argmax(node_activity))
+        x = np.arange(activity.shape[0]) * 4
+        axes[1, 0].step(x, activity[:, 0, node_idx], where='mid',
+                        color='black', alpha=0.6, label='Observed activity')
+        axes[1, 0].plot(x, probability[:, 0, node_idx], color='tab:orange',
+                        label='Predicted probability')
+        axes[1, 0].axhline(threshold, color='red', linestyle='--', alpha=0.7)
+        axes[1, 0].set(xlabel='Elapsed forecast-origin time (hours)',
+                       ylabel='Activity / probability',
+                       title=f'Activity at node {node_idx}, lead 4 h')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
+
+        # Conditional magnitude is evaluated only where an event occurred.
+        mag_active = magnitude.flatten()[activity_flat]
+        cond_active = conditional.flatten()[activity_flat]
+        if len(mag_active) > 5000:
+            rng = np.random.default_rng(42)
+            sample = rng.choice(len(mag_active), 5000, replace=False)
+            mag_active = mag_active[sample]
+            cond_active = cond_active[sample]
+        axes[1, 1].scatter(mag_active, cond_active, alpha=0.2, s=8)
+        if len(mag_active):
+            lower = min(mag_active.min(), cond_active.min())
+            upper = max(mag_active.max(), cond_active.max())
+            axes[1, 1].plot([lower, upper], [lower, upper], 'r--')
+        axes[1, 1].set(xlabel='Observed Mw in active bins',
+                       ylabel='Conditional predicted Mw',
+                       title='Conditional magnitude head')
+        axes[1, 1].grid(True, alpha=0.3)
+
+        fig.suptitle('Hurdle Model Diagnostics', fontsize=14, fontweight='bold')
+        fig.tight_layout()
+        save_path = self.save_dir / f'{save_name}.png'
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f" Saved: {save_path}")
+        return fig
     
-    def plot_per_horizon_metrics(self, per_horizon_metrics, save_name='per_horizon_metrics'):
+    def plot_per_horizon_metrics(self, per_horizon_metrics, time_bin_hours=4,
+                                 save_name='per_horizon_metrics'):
         """Plot metrics for each prediction horizon."""
         # Close any previous figures to prevent overlapping
         plt.close('all')
@@ -227,7 +334,7 @@ class PredictionVisualizer:
             ax.clear()
             
             values = [per_horizon_metrics[h][metric] for h in horizons]
-            horizon_nums = [int(h[1:]) for h in horizons]
+            horizon_nums = [int(h[1:]) * time_bin_hours for h in horizons]
             
             ax.plot(horizon_nums, values, 'o-', linewidth=2, markersize=6, color='steelblue')
             ax.set_xlabel('Forecast Horizon (hours)')

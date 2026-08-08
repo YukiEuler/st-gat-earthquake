@@ -226,6 +226,7 @@ def load_model(model_path, model_kwargs, device):
     # Load state dict
     model.load_state_dict(state_dict)
     model.eval()
+    model.checkpoint_config = saved_config
     
     print(f"   Model loaded successfully!")
     print(f"   Total parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -568,11 +569,13 @@ def main():
     all_features = CONFIG['features']
     target_features = CONFIG.get('target_features', all_features)
     target_indices = [all_features.index(f) for f in target_features if f in all_features]
+    use_hurdle = CONFIG.get('loss_type') == 'hurdle'
     
     # Create test loader
     test_dataset = SeismicDataset(
         data['test_data'],
         target_data=data['test_target_data'],
+        activity_data=data['test_target_activity'] if use_hurdle else None,
         window_size=CONFIG['window_size'],
         horizon=CONFIG['horizon'],
     )
@@ -590,7 +593,10 @@ def main():
         'num_nodes': data['num_nodes'],
         'in_features': data['train_data'].shape[-1],
         'hidden_dim': CONFIG['hidden_dim'],
-        'out_features': len(target_features),
+        'out_features': (
+            int(CONFIG.get('model_output_features', 2))
+            if use_hurdle else len(target_features)
+        ),
         'horizon': CONFIG['horizon'],
         'num_gat_layers': CONFIG['num_gat_layers'],
         'num_heads': CONFIG['num_heads'],
@@ -601,13 +607,37 @@ def main():
     print(f"   Model path: {model_path}")
     
     model, model_type = load_model(model_path, model_kwargs, DEVICE)
+    checkpoint_config = getattr(model, 'checkpoint_config', CONFIG)
     
     # ====================
     # GENERATE PREDICTIONS
     # ====================
     print("\n Generating predictions...")
-    predictions, targets = generate_predictions(model, test_loader, adj_sparse, DEVICE)
-    print(f"   Predictions shape: {predictions.shape}")
+    raw_predictions, packed_targets = generate_predictions(
+        model, test_loader, adj_sparse, DEVICE
+    )
+    activity_targets = None
+    hurdle_outputs = None
+    if use_hurdle:
+        from training.hurdle import decode_hurdle_numpy, split_hurdle_targets
+        targets, activity_targets = split_hurdle_targets(packed_targets)
+        hurdle_outputs = decode_hurdle_numpy(
+            raw_predictions,
+            activity_threshold=checkpoint_config.get(
+                'hurdle_activity_threshold', 0.5
+            ),
+            activity_logit_bias=checkpoint_config.get(
+                'fitted_activity_logit_bias', 0.0
+            ),
+        )
+        primary_prediction = checkpoint_config.get(
+            'hurdle_primary_prediction', 'expected'
+        )
+        predictions = hurdle_outputs[primary_prediction]
+    else:
+        predictions, targets = raw_predictions, packed_targets
+    print(f"   Raw model output shape: {raw_predictions.shape}")
+    print(f"   Primary predictions shape: {predictions.shape}")
     print(f"   Targets shape: {targets.shape}")
 
     # The model operates on normalized raw targets; report metrics in Mw.
@@ -623,17 +653,40 @@ def main():
     
     # Overall metrics
     metrics_calc = MetricsCalculator(feature_names=target_features)
-    overall_metrics = metrics_calc.calculate_all_metrics(targets, predictions)
+    overall_metrics = metrics_calc.calculate_all_metrics(
+        targets, predictions, activity_mask=activity_targets
+    )
+    overall_metrics['diagnostics'] = metrics_calc.calculate_forecast_diagnostics(
+        targets, predictions
+    )
+    if hurdle_outputs is not None:
+        overall_metrics['activity_detection'] = metrics_calc.calculate_activity_metrics(
+            activity_targets,
+            hurdle_outputs['activity_probability'],
+            threshold=checkpoint_config.get('hurdle_activity_threshold', 0.5),
+        )
+        conditional_raw = (
+            hurdle_outputs['conditional'] * target_std + target_mean
+        )
+        active_entries = np.broadcast_to(
+            activity_targets >= 0.5, targets.shape
+        )
+        overall_metrics['conditional_magnitude_active'] = (
+            metrics_calc.calculate_regression_metrics(
+                targets[active_entries], conditional_raw[active_entries]
+            )
+        )
     
     # Per-horizon metrics
     metrics_per_horizon = calculate_per_horizon_metrics(targets, predictions, target_features)
     
-    # Simple uncertainty estimate (using prediction variance across samples)
-    # For single model, we don't have true ensemble uncertainty
-    # Use a placeholder based on prediction magnitude
-    std_pred = np.abs(predictions) * 0.1 + 0.05  # Proxy uncertainty
-    
-    uncertainty_metrics = calculate_uncertainty_metrics(targets, predictions, std_pred)
+    # A single deterministic checkpoint has no defensible predictive standard
+    # deviation. Do not fabricate one from prediction magnitude; uncertainty
+    # must come from the separately calibrated ensemble pipeline.
+    uncertainty_metrics = {
+        'available': False,
+        'reason': 'single deterministic checkpoint; run the ensemble pipeline',
+    }
     
     # ====================
     # PRINT SUMMARY
@@ -645,6 +698,28 @@ def main():
     print("\n Overall Metrics:")
     for key, value in overall_metrics['overall'].items():
         print(f"   {key}: {value:.4f}")
+
+    if overall_metrics.get('activity_detection'):
+        activity = overall_metrics['activity_detection']
+        print("\n Activity Detection:")
+        print(f"   Prevalence:       {activity['prevalence']:.4f}")
+        print(f"   Mean probability: {activity['mean_probability']:.4f}")
+        print(f"   Brier score:      {activity['brier_score']:.4f}")
+        print(f"   PR-AUC:           {activity['pr_auc']:.4f}")
+
+    diagnostics = overall_metrics['diagnostics']
+    print("\n Forecast Diagnostics:")
+    print(f"   Model MSE:              {diagnostics['model_mse']:.4f}")
+    print(f"   All-zero forecast MSE:  {diagnostics['zero_forecast_mse']:.4f}")
+    print(f"   Skill vs zero forecast: {diagnostics['skill_vs_zero_forecast']:.4f}")
+    print(
+        "   Constant prediction warning: "
+        f"{diagnostics['constant_prediction_warning']}"
+    )
+    print(
+        "   Worse than zero warning:     "
+        f"{diagnostics['worse_than_zero_forecast_warning']}"
+    )
     
     print("\n Per-Feature Metrics (h=1):")
     for fname, fmetrics in metrics_per_horizon['h1']['per_feature'].items():
@@ -656,9 +731,7 @@ def main():
         r2 = metrics_per_horizon[h_key]['overall']['R2']
         print(f"   {h_key}: RMSE={rmse:.4f}, R²={r2:.4f}")
     
-    print("\n Uncertainty Metrics:")
-    for key, value in uncertainty_metrics.items():
-        print(f"   {key}: {value:.4f}")
+    print("\n Uncertainty Metrics: not available for a single checkpoint")
     
     # ====================
     # SAVE OUTPUTS
@@ -675,14 +748,18 @@ def main():
     # Visualizations
     plot_per_horizon_metrics(metrics_per_horizon, figures_dir)
     plot_per_feature_metrics(metrics_per_horizon, target_features, figures_dir)
-    plot_uncertainty_analysis(targets, predictions, std_pred, figures_dir)
     
     # Metrics files
     all_metrics = {
         'overall': overall_metrics['overall'],
         'per_feature': overall_metrics.get('per_feature', {}),
         'per_horizon': metrics_per_horizon,
-        'uncertainty': uncertainty_metrics
+        'activity_detection': overall_metrics.get('activity_detection'),
+        'conditional_magnitude_active': overall_metrics.get(
+            'conditional_magnitude_active'
+        ),
+        'diagnostics': overall_metrics.get('diagnostics'),
+        'uncertainty': uncertainty_metrics,
     }
     save_metrics_to_json(all_metrics, metrics_dir / 'complete_metrics.json')
     

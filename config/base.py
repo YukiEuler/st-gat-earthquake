@@ -9,8 +9,9 @@ import torch
 # ==============================================================================
 CONFIG = {
     # Canonical rerun protocol (revision plan)
-    'canonical_run_name': 'revision_canonical_v2_sparse',
+    'canonical_run_name': 'revision_canonical_v3_hurdle',
     'target_definition': 'raw_bin_max_mw',
+    'auxiliary_target_definition': 'raw_bin_activity_indicator',
     'target_zero_preserving': True,
     'split_mode': 'timestamp',
     'history_hours': 96,
@@ -89,9 +90,10 @@ CONFIG = {
     'gradient_clip_norm': 1.0,
     
     # Weighted Loss
-    # For sparse_aware loss this is the base multiplier. The effective
-    # multiplier is adapted to each batch and capped below.
-    'active_weight': 2.0,
+    # Legacy weighted losses. The canonical hurdle objective below does not
+    # use dynamic active weighting because it biases every point forecast
+    # upward when train/test activity prevalence differs.
+    'active_weight': 1.0,
     'max_dynamic_active_weight': 60.0,
     # Additional non-cumulative weights for increasingly rare magnitudes.
     # These thresholds are interpreted in raw Mw units by SparseAwareLoss.
@@ -111,8 +113,27 @@ CONFIG = {
     },
     
     # Loss Function Options
-    # Options: 'weighted_mse', 'asymmetric', 'active_only', 'sparse_aware', 'focal', 'multiscale'
-    'loss_type': 'sparse_aware',
+    # Options: 'hurdle', 'weighted_mse', 'asymmetric', 'active_only',
+    #          'sparse_aware', 'focal', 'multiscale'
+    'loss_type': 'hurdle',
+    # The canonical model has one primary raw-Mw target and one auxiliary
+    # activity logit. Primary regression metrics use the expected point
+    # forecast P(activity) * E[Mw | activity].
+    'model_output_features': 2,
+    'hurdle_primary_prediction': 'expected',
+    'hurdle_activity_threshold': 0.5,
+    'hurdle_calibrate_activity_bias_on_validation': True,
+    'hurdle_activity_loss_weight': 1.0,
+    'hurdle_magnitude_loss_weight': 1.0,
+    'hurdle_expected_value_loss_weight': 1.0,
+    'hurdle_smooth_l1_beta': 0.5,
+    # Keep None for probability calibration. Class-balancing the BCE would
+    # change the probability scale and recreate the positive-forecast bias.
+    'hurdle_activity_pos_weight': None,
+    # Rare-event weighting is deliberately disabled for the primary run.
+    # Threshold skill is reported separately instead of distorting RMSE/R2.
+    'hurdle_magnitude_event_thresholds': [],
+    'hurdle_magnitude_event_weights': [],
     'asymmetric_alpha': 0.8,      # Alpha for asymmetric loss (>0.5 = penalize underpredict more)
     'underpredict_penalty': 2.0,
     'magnitude_idx': 0,           # Index of max_mw in target features (now 0 since only max_mw)
@@ -143,7 +164,7 @@ CONFIG = {
     'n_cv_splits': 5,
     
     # Output
-    'output_dir': 'outputs/revision_canonical_v2',
+    'output_dir': 'outputs/revision_canonical_v3',
     'save_figures': True,
     'save_attention': True,
     

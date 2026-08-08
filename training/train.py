@@ -94,23 +94,30 @@ def main(args):
     all_features = CONFIG['features']
     target_features = CONFIG.get('target_features', all_features)
     target_indices = [all_features.index(f) for f in target_features if f in all_features]
+    # The auxiliary activity channel belongs to the canonical primary model.
+    # Legacy ablation/ensemble modes still compare one-output regressors and
+    # therefore keep their original one-channel target tensors.
+    use_hurdle = CONFIG.get('loss_type') == 'hurdle' and args.mode == 'train'
     
     # Create dataloaders
     train_dataset = SeismicDataset(
         data['train_data'],
         target_data=data['train_target_data'],
+        activity_data=data['train_target_activity'] if use_hurdle else None,
         window_size=CONFIG['window_size'],
         horizon=CONFIG['horizon'],
     )
     val_dataset = SeismicDataset(
         data['val_data'],
         target_data=data['val_target_data'],
+        activity_data=data['val_target_activity'] if use_hurdle else None,
         window_size=CONFIG['window_size'],
         horizon=CONFIG['horizon'],
     )
     test_dataset = SeismicDataset(
         data['test_data'],
         target_data=data['test_target_data'],
+        activity_data=data['test_target_activity'] if use_hurdle else None,
         window_size=CONFIG['window_size'],
         horizon=CONFIG['horizon'],
     )
@@ -127,6 +134,10 @@ def main(args):
         'num_nodes': data['num_nodes'],
         'n_input_features': data['train_data'].shape[-1], 
         'n_target_features': len(target_features),
+        'n_model_outputs': (
+            int(CONFIG.get('model_output_features', 2))
+            if use_hurdle else len(target_features)
+        ),
         'target_features': target_features,
         'feature_stats': data['feature_stats'],
         'target_stats': data['target_stats'],
@@ -158,7 +169,7 @@ def main(args):
                 num_nodes=data['num_nodes'],
                 in_features=data_info['n_input_features'],
                 hidden_dim=CONFIG['hidden_dim'],
-                out_features=data_info['n_target_features'],
+                out_features=data_info['n_model_outputs'],
                 horizon=CONFIG['horizon'],
                 num_gat_layers=CONFIG['num_gat_layers'],
                 num_heads=CONFIG['num_heads'],
@@ -171,7 +182,7 @@ def main(args):
                 num_nodes=data['num_nodes'],
                 in_features=data_info['n_input_features'],
                 hidden_dim=CONFIG['hidden_dim'],
-                out_features=data_info['n_target_features'],
+                out_features=data_info['n_model_outputs'],
                 horizon=CONFIG['horizon'],
                 num_gat_layers=CONFIG['num_gat_layers'],
                 num_heads=CONFIG['num_heads'],
@@ -187,7 +198,7 @@ def main(args):
                         num_nodes=data['num_nodes'],
                         in_features=data_info['n_input_features'],
                         hidden_dim=CONFIG['hidden_dim'],
-                        out_features=data_info['n_target_features'],
+                        out_features=data_info['n_model_outputs'],
                         horizon=CONFIG['horizon'],
                         num_gat_layers=CONFIG['num_gat_layers'],
                         num_heads=CONFIG['num_heads'],
@@ -200,7 +211,31 @@ def main(args):
         loss_type = CONFIG.get('loss_type', 'weighted_mse')
         print(f"\n Using Loss Function: {loss_type}")
         
-        if loss_type == 'asymmetric':
+        if loss_type == 'hurdle':
+            from training.losses import HurdleMagnitudeLoss
+            magnitude_idx = CONFIG.get('magnitude_idx', 0)
+            target_scale = data['target_stats']['std'][magnitude_idx]
+            target_offset = data['target_stats'].get(
+                'offset', data['target_stats']['mean']
+            )[magnitude_idx]
+            criterion = HurdleMagnitudeLoss(
+                activity_weight=CONFIG.get('hurdle_activity_loss_weight', 1.0),
+                magnitude_weight=CONFIG.get('hurdle_magnitude_loss_weight', 1.0),
+                expected_value_weight=CONFIG.get(
+                    'hurdle_expected_value_loss_weight', 1.0
+                ),
+                smooth_l1_beta=CONFIG.get('hurdle_smooth_l1_beta', 0.5),
+                activity_pos_weight=CONFIG.get('hurdle_activity_pos_weight'),
+                magnitude_thresholds=CONFIG.get(
+                    'hurdle_magnitude_event_thresholds', []
+                ),
+                magnitude_weights=CONFIG.get(
+                    'hurdle_magnitude_event_weights', []
+                ),
+                target_scale=target_scale,
+                target_offset=target_offset,
+            )
+        elif loss_type == 'asymmetric':
             criterion = AsymmetricMSELoss(
                 alpha=CONFIG.get('asymmetric_alpha', 0.8),
                 magnitude_idx=CONFIG.get('magnitude_idx', 1),
@@ -257,22 +292,81 @@ def main(args):
         
         trainer = Trainer(model, criterion, CONFIG, DEVICE)
         train_result = trainer.fit(train_loader, val_loader, adj_sparse)
+
+        # Calibrate only an activity-logit intercept on validation. This
+        # corrects prevalence bias without touching the test targets or
+        # changing the conditional magnitude head.
+        activity_logit_bias = 0.0
+        if use_hurdle and CONFIG.get(
+            'hurdle_calibrate_activity_bias_on_validation', True
+        ):
+            from training.hurdle import fit_activity_logit_bias
+            validation_outputs = []
+            validation_targets = []
+            model.eval()
+            with torch.no_grad():
+                for batch_data, batch_target in val_loader:
+                    batch_data = batch_data.to(DEVICE)
+                    validation_outputs.append(
+                        model(batch_data, adj_sparse).cpu().numpy()
+                    )
+                    validation_targets.append(batch_target.numpy())
+            validation_outputs = np.concatenate(validation_outputs, axis=0)
+            validation_targets = np.concatenate(validation_targets, axis=0)
+            activity_logit_bias = fit_activity_logit_bias(
+                validation_outputs[..., 1:2],
+                validation_targets[..., 1:2],
+            )
+            print(
+                "\n Validation-only activity calibration: "
+                f"logit bias={activity_logit_bias:.6f}"
+            )
+
+        effective_config = dict(CONFIG)
+        effective_config['fitted_activity_logit_bias'] = float(activity_logit_bias)
         
         # Generate predictions
         print("\n Generating predictions...")
         model.eval()
-        predictions = []
-        targets = []
+        raw_predictions = []
+        packed_targets = []
         
         with torch.no_grad():
             for batch_data, batch_target in test_loader:
                 batch_data = batch_data.to(DEVICE)
                 output = model(batch_data, adj_sparse)
-                predictions.append(output.cpu().numpy())
-                targets.append(batch_target.numpy())
+                raw_predictions.append(output.cpu().numpy())
+                packed_targets.append(batch_target.numpy())
         
-        predictions = np.concatenate(predictions, axis=0)
-        targets = np.concatenate(targets, axis=0)
+        raw_predictions = np.concatenate(raw_predictions, axis=0)
+        packed_targets = np.concatenate(packed_targets, axis=0)
+
+        hurdle_outputs = None
+        activity_targets = None
+        if use_hurdle:
+            from training.hurdle import decode_hurdle_numpy, split_hurdle_targets
+            targets, activity_targets = split_hurdle_targets(packed_targets)
+            hurdle_outputs = decode_hurdle_numpy(
+                raw_predictions,
+                activity_threshold=CONFIG.get('hurdle_activity_threshold', 0.5),
+                activity_logit_bias=activity_logit_bias,
+            )
+            primary_prediction = CONFIG.get(
+                'hurdle_primary_prediction', 'expected'
+            )
+            if primary_prediction not in {'expected', 'thresholded'}:
+                raise ValueError(
+                    "hurdle_primary_prediction must be 'expected' or 'thresholded'."
+                )
+            predictions = hurdle_outputs[primary_prediction]
+            print(
+                "   Hurdle decoding: "
+                f"primary={primary_prediction}, "
+                f"activity threshold={CONFIG.get('hurdle_activity_threshold', 0.5):.2f}"
+            )
+        else:
+            predictions = raw_predictions
+            targets = packed_targets
         
         # Denormalize predictions and targets for proper metrics calculation
         print(" Denormalizing for metrics calculation...")
@@ -284,7 +378,8 @@ def main(args):
         print(f"   Raw train mean: {target_stats['mean']}")
         print(f"   Denormalization offset: {target_mean}")
         print(f"   Std: {target_std}")
-        print(f"   Predictions shape: {predictions.shape}")
+        print(f"   Raw model output shape: {raw_predictions.shape}")
+        print(f"   Primary predictions shape: {predictions.shape}")
         print(f"   Targets shape: {targets.shape}")
         
         # Denormalize: x_denorm = x_norm * std + mean
@@ -300,10 +395,49 @@ def main(args):
         
         predictions_denorm = predictions * target_std + target_mean
         targets_denorm = targets * target_std + target_mean
+
+        hurdle_denorm = None
+        if hurdle_outputs is not None:
+            hurdle_denorm = {
+                'conditional': hurdle_outputs['conditional'] * target_std + target_mean,
+                'expected': hurdle_outputs['expected'] * target_std + target_mean,
+                'thresholded': hurdle_outputs['thresholded'] * target_std + target_mean,
+                'activity_probability': hurdle_outputs['activity_probability'],
+            }
         
         # Calculate metrics on DENORMALIZED data
         metrics_calc = MetricsCalculator(feature_names=data_info['target_features'])
-        metrics = metrics_calc.calculate_all_metrics(targets_denorm, predictions_denorm, magnitude_idx=CONFIG.get('magnitude_idx', 0))
+        metrics = metrics_calc.calculate_all_metrics(
+            targets_denorm,
+            predictions_denorm,
+            magnitude_idx=CONFIG.get('magnitude_idx', 0),
+            activity_mask=activity_targets,
+        )
+        metrics['diagnostics'] = metrics_calc.calculate_forecast_diagnostics(
+            targets_denorm, predictions_denorm
+        )
+        if hurdle_denorm is not None:
+            metrics['activity_detection'] = metrics_calc.calculate_activity_metrics(
+                activity_targets,
+                hurdle_denorm['activity_probability'],
+                threshold=CONFIG.get('hurdle_activity_threshold', 0.5),
+            )
+            active_entries = np.broadcast_to(
+                activity_targets >= 0.5, targets_denorm.shape
+            )
+            metrics['conditional_magnitude_active'] = (
+                metrics_calc.calculate_regression_metrics(
+                    targets_denorm[active_entries],
+                    hurdle_denorm['conditional'][active_entries],
+                )
+            )
+            metrics['thresholded_point_forecast'] = (
+                metrics_calc.calculate_regression_metrics(
+                    targets_denorm,
+                    hurdle_denorm['thresholded'],
+                    activity_mask=activity_targets,
+                )
+            )
         metrics_calc.print_metrics(metrics)
         
         # Visualizations
@@ -320,10 +454,19 @@ def main(args):
         pred_viz.plot_timeseries_prediction(targets_denorm, predictions_denorm, 
                                             node_idx=0, horizon_idx=0)
         pred_viz.plot_per_horizon_metrics(metrics['per_horizon'])
+        if hurdle_denorm is not None:
+            pred_viz.plot_hurdle_activity(
+                activity_targets,
+                hurdle_denorm['activity_probability'],
+                targets_denorm,
+                hurdle_denorm['conditional'],
+                threshold=CONFIG.get('hurdle_activity_threshold', 0.5),
+            )
         
         # Plot predictions at most active node
         print("\n Visualizing most active node...")
-        pred_viz.plot_most_active_node(targets_denorm, predictions_denorm, 
+        pred_viz.plot_most_active_node(targets_denorm, predictions_denorm,
+                                       activity_mask=activity_targets,
                                        horizon_idx=0,
                                        save_name='most_active_node_prediction')
         
@@ -352,12 +495,12 @@ def main(args):
         
         # Save outputs
         save_all_outputs(
-            output_dir, model, CONFIG, metrics, adj_scipy,
+            output_dir, model, effective_config, metrics, adj_scipy,
             data['feature_stats'], data['node_info'], train_result,
             target_stats=data['target_stats']
         )
         write_run_manifest(
-            output_dir, CONFIG, data=data, data_path=CONFIG['filename'],
+            output_dir, effective_config, data=data, data_path=CONFIG['filename'],
             adjacency=adj_scipy,
             checkpoint_paths=[output_dir / 'models' / 'stgat_best.pth'],
             stage='training_complete'
@@ -370,13 +513,17 @@ def main(args):
         
         predictions_df = generate_regression_predictions_csv(
             predictions_denorm, targets_denorm,
-            data_info['target_features'], output_dir
+            data_info['target_features'], output_dir,
+            activity_targets=activity_targets,
+            hurdle_outputs=hurdle_denorm,
         )
         
         html_path = output_dir / 'predictions_viewer.html'
         generate_regression_html_viewer(predictions_df, html_path, data_info['target_features'])
         print(f"   HTML viewer saved to {html_path}")
-        generate_summary_report(output_dir, CONFIG, metrics, train_result)
+        generate_summary_report(
+            output_dir, effective_config, metrics, train_result
+        )
         
     # ====================
     # MODE: ENSEMBLE
@@ -525,7 +672,9 @@ def main(args):
     print("\n Done!")
 
 
-def generate_regression_predictions_csv(predictions, targets, feature_names, output_dir):
+def generate_regression_predictions_csv(
+        predictions, targets, feature_names, output_dir,
+        activity_targets=None, hurdle_outputs=None):
     """Generate predictions CSV for regression model."""
     import pandas as pd
     
@@ -544,6 +693,23 @@ def generate_regression_predictions_csv(predictions, targets, feature_names, out
                 for f_idx, fname in enumerate(feature_names):
                     row[f'{fname}_target'] = float(targets[b, h, n, f_idx])
                     row[f'{fname}_pred'] = float(predictions[b, h, n, f_idx])
+                if activity_targets is not None:
+                    row['activity_target'] = int(
+                        activity_targets[b, h, n, 0] >= 0.5
+                    )
+                if hurdle_outputs is not None:
+                    row['activity_probability'] = float(
+                        hurdle_outputs['activity_probability'][b, h, n, 0]
+                    )
+                    row['max_mw_pred_conditional'] = float(
+                        hurdle_outputs['conditional'][b, h, n, 0]
+                    )
+                    row['max_mw_pred_expected'] = float(
+                        hurdle_outputs['expected'][b, h, n, 0]
+                    )
+                    row['max_mw_pred_thresholded'] = float(
+                        hurdle_outputs['thresholded'][b, h, n, 0]
+                    )
                 all_rows.append(row)
         sample_idx += 1
     

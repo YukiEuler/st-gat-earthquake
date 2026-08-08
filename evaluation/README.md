@@ -17,7 +17,7 @@ Usage:
 from evaluation.metrics import MetricsCalculator
 
 calc = MetricsCalculator()
-metrics = calc.compute(y_true, y_pred)
+metrics = calc.calculate_all_metrics(y_true, y_pred, activity_mask=activity)
 ```
 
 ### Calibration: `calibration.py`
@@ -40,9 +40,13 @@ Systematic ablation studies to analyze model components:
 **Main evaluation functions**
 
 Entry point for comprehensive model evaluation:
-- Training/validation/test metrics
+- Raw-Mw test metrics and activity-head diagnostics
 - Prediction visualization
 - Error analysis
+
+`evaluate.py` does not invent uncertainty for a deterministic checkpoint.
+Prediction intervals must come from the separately trained and
+validation-calibrated ensemble pipeline.
 
 ## Typical Workflow
 
@@ -51,7 +55,7 @@ from evaluation import MetricsCalculator, AblationStudy
 from evaluation.calibration import EnsembleCalibration
 
 # Compute metrics
-metrics = MetricsCalculator().compute(y_true, y_pred)
+metrics = MetricsCalculator().calculate_all_metrics(y_true, y_pred)
 
 # Calibrate ensemble
 calibrator = EnsembleCalibration()

@@ -14,7 +14,8 @@ class SeismicDataset(Dataset):
     """
     
     def __init__(self, data, window_size=24, horizon=24,
-                 feature_indices=None, target_indices=None, target_data=None):
+                 feature_indices=None, target_indices=None, target_data=None,
+                 activity_data=None):
         """
         Args:
             data: numpy array (T, N, F) - normalized features
@@ -26,9 +27,15 @@ class SeismicDataset(Dataset):
             target_data: optional separate target tensor. This is required for
                 leakage-safe forecasting when input features contain rolling
                 context or transforms.
+            activity_data: optional binary tensor ``(T, N, 1)`` indicating
+                whether an event occurred in each target bin. When supplied,
+                it is appended to ``y`` as an auxiliary target channel. This
+                avoids inferring activity from Mw, where zero and negative
+                event magnitudes are valid observations.
         """
         self.data = data
         self.target_data = data if target_data is None else target_data
+        self.activity_data = activity_data
         self.window = window_size
         self.horizon = horizon
         self.feature_indices = feature_indices
@@ -37,6 +44,8 @@ class SeismicDataset(Dataset):
     def __len__(self):
         if len(self.data) != len(self.target_data):
             raise ValueError("Input and target tensors must have the same time length.")
+        if self.activity_data is not None and len(self.data) != len(self.activity_data):
+            raise ValueError("Input and activity tensors must have the same time length.")
         return len(self.data) - self.window - self.horizon + 1
     
     def __getitem__(self, idx):
@@ -51,6 +60,16 @@ class SeismicDataset(Dataset):
         # Target selection for output
         if self.target_indices is not None and y.shape[-1] > max(self.target_indices, default=-1):
             y = y[:, :, self.target_indices]
+
+        if self.activity_data is not None:
+            activity = self.activity_data[
+                idx + self.window : idx + self.window + self.horizon
+            ]
+            if activity.ndim != y.ndim or activity.shape[:-1] != y.shape[:-1]:
+                raise ValueError(
+                    "Activity target must match the target horizon/node dimensions."
+                )
+            y = np.concatenate([y, activity.astype(np.float32)], axis=-1)
         
         # Convert to tensor
         x = torch.from_numpy(x).float()

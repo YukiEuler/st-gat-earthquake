@@ -48,7 +48,7 @@ def write_run_manifest(output_dir, config, data=None, data_path=None,
     project_root = Path(__file__).resolve().parents[1]
 
     manifest = {
-        'manifest_version': 1,
+        'manifest_version': 2,
         'stage': stage,
         'created_at_utc': datetime.now(timezone.utc).isoformat(),
         'project_root': str(project_root),
@@ -58,6 +58,7 @@ def write_run_manifest(output_dir, config, data=None, data_path=None,
         'config': config,
         'seed': config.get('seed'),
         'target_definition': config.get('target_definition', 'configured_target_features'),
+        'auxiliary_target_definition': config.get('auxiliary_target_definition'),
         'target_features': config.get('target_features', []),
         'checkpoint_paths': [str(path) for path in (checkpoint_paths or [])],
     }
@@ -78,6 +79,9 @@ def write_run_manifest(output_dir, config, data=None, data_path=None,
             'target_features': data.get('target_features', config.get('target_features', [])),
             'input_shape_full': list(getattr(data.get('X_raw'), 'shape', [])),
             'target_shape_full': list(getattr(data.get('target_raw'), 'shape', [])),
+            'activity_target_shape_full': list(
+                getattr(data.get('target_activity_raw'), 'shape', [])
+            ),
             'train_shape': list(getattr(data.get('train_data'), 'shape', [])),
             'val_shape': list(getattr(data.get('val_data'), 'shape', [])),
             'test_shape': list(getattr(data.get('test_data'), 'shape', [])),

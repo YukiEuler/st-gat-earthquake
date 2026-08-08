@@ -4,6 +4,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class WeightedMSELoss(nn.Module):
@@ -351,6 +352,120 @@ class ActiveOnlyMSELoss(nn.Module):
         active_loss = weighted_mse[active_mask_expanded]
         
         return active_loss.mean()
+
+
+class HurdleMagnitudeLoss(nn.Module):
+    """Two-part objective for zero-inflated raw-bin magnitude targets.
+
+    The model emits two values per node/horizon: a conditional normalized Mw
+    estimate and an activity logit.  Targets contain the normalized raw Mw and
+    an explicit binary activity indicator.  This prevents the regression loss
+    from resolving the empty-bin/active-bin conflict by predicting a positive
+    global average everywhere.
+    """
+
+    def __init__(self, activity_weight=1.0, magnitude_weight=1.0,
+                 expected_value_weight=1.0, smooth_l1_beta=0.5,
+                 activity_pos_weight=None, magnitude_thresholds=None,
+                 magnitude_weights=None, target_scale=1.0,
+                 target_offset=0.0):
+        super().__init__()
+        self.activity_weight = float(activity_weight)
+        self.magnitude_weight = float(magnitude_weight)
+        self.expected_value_weight = float(expected_value_weight)
+        self.smooth_l1_beta = float(smooth_l1_beta)
+        self.activity_pos_weight = (
+            None if activity_pos_weight is None else float(activity_pos_weight)
+        )
+        self.magnitude_thresholds = list(magnitude_thresholds or [])
+        self.magnitude_weights = list(magnitude_weights or [])
+        if len(self.magnitude_thresholds) != len(self.magnitude_weights):
+            raise ValueError(
+                "magnitude_thresholds and magnitude_weights must have equal lengths"
+            )
+        self.target_scale = float(target_scale)
+        self.target_offset = float(target_offset)
+        self._last_components = {}
+
+    def forward(self, pred, target):
+        if pred.shape[-1] != 2:
+            raise ValueError(
+                "HurdleMagnitudeLoss expects two model outputs: "
+                "conditional_magnitude and activity_logit."
+            )
+        if target.shape[-1] < 2:
+            raise ValueError(
+                "HurdleMagnitudeLoss expects magnitude plus an explicit "
+                "activity target channel."
+            )
+
+        conditional_magnitude = pred[..., 0]
+        activity_logit = pred[..., 1]
+        magnitude_target = target[..., 0]
+        activity_target = target[..., 1].clamp(0.0, 1.0)
+        active_mask = activity_target > 0.5
+
+        pos_weight = None
+        if self.activity_pos_weight is not None:
+            pos_weight = torch.as_tensor(
+                self.activity_pos_weight,
+                dtype=pred.dtype,
+                device=pred.device,
+            )
+        activity_loss = F.binary_cross_entropy_with_logits(
+            activity_logit,
+            activity_target,
+            pos_weight=pos_weight,
+        )
+
+        if active_mask.any():
+            conditional_error = F.smooth_l1_loss(
+                conditional_magnitude[active_mask],
+                magnitude_target[active_mask],
+                beta=self.smooth_l1_beta,
+                reduction='none',
+            )
+            if self.magnitude_thresholds:
+                magnitude_raw = (
+                    magnitude_target[active_mask] * self.target_scale
+                    + self.target_offset
+                )
+                rare_weight = torch.ones_like(conditional_error)
+                for threshold, weight in zip(
+                    self.magnitude_thresholds, self.magnitude_weights
+                ):
+                    rare_weight = torch.where(
+                        magnitude_raw >= threshold,
+                        torch.as_tensor(
+                            weight,
+                            dtype=pred.dtype,
+                            device=pred.device,
+                        ),
+                        rare_weight,
+                    )
+                conditional_error = conditional_error * rare_weight
+            magnitude_loss = conditional_error.mean()
+        else:
+            magnitude_loss = conditional_magnitude.sum() * 0.0
+
+        activity_probability = torch.sigmoid(activity_logit)
+        expected_magnitude = activity_probability * conditional_magnitude
+        expected_value_loss = F.mse_loss(expected_magnitude, magnitude_target)
+
+        total = (
+            self.activity_weight * activity_loss
+            + self.magnitude_weight * magnitude_loss
+            + self.expected_value_weight * expected_value_loss
+        )
+        self._last_components = {
+            'activity': float(activity_loss.detach().cpu()),
+            'conditional_magnitude': float(magnitude_loss.detach().cpu()),
+            'expected_value': float(expected_value_loss.detach().cpu()),
+        }
+        return total
+
+    def get_components(self):
+        return dict(self._last_components)
 
 
 class SparseAwareLoss(nn.Module):
